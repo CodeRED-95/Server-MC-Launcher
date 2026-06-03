@@ -2,20 +2,86 @@ import os
 import sys
 import json
 import struct
+import shutil
+import zipfile
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QPushButton, 
                              QVBoxLayout, QHBoxLayout, QWidget, 
                              QListWidget, QListWidgetItem, QPlainTextEdit, 
-                             QLabel, QDialog, QFileDialog, QLineEdit, QComboBox)
-from PyQt6.QtCore import QProcess, QProcessEnvironment, Qt, QSize
+                             QLabel, QDialog, QFileDialog, QLineEdit, QComboBox,
+                             QProgressBar, QMessageBox)
+from PyQt6.QtCore import QProcess, QProcessEnvironment, Qt, QSize, QThread, pyqtSignal
 from PyQt6.QtGui import QIcon, QPixmap
 
 
+class DownloaderWorker(QThread):
+    """Hilo secundario para descargar y extraer Java sin congelar la interfaz."""
+    progreso = pyqtSignal(int)
+    estado = pyqtSignal(str)
+    finalizado = pyqtSignal(bool, str)
+
+    def __init__(self, url, destino_zip, carpeta_extraccion):
+        super().__init__()
+        self.url = url
+        self.destino_zip = destino_zip
+        self.carpeta_extraccion = carpeta_extraccion
+
+    def run(self):
+        try:
+            import urllib.request
+            self.estado.emit("Descargando paquete de Java (OpenJDK)...")
+            
+            # Conexión y descarga con reporte de progreso
+            req = urllib.request.Request(self.url, headers={'User-Agent': 'Mozilla/5.0'})
+            with urllib.request.urlopen(req) as response:
+                total_size = int(response.info().get('Content-Length', 0))
+                bytes_leidos = 0
+                block_size = 1024 * 64
+                
+                with open(self.destino_zip, 'wb') as f:
+                    while True:
+                        buffer = response.read(block_size)
+                        if not buffer:
+                            break
+                        bytes_leidos += len(buffer)
+                        f.write(buffer)
+                        if total_size > 0:
+                            porcentaje = int((bytes_leidos / total_size) * 100)
+                            self.progreso.emit(porcentaje)
+
+            self.estado.emit("Extrayendo archivos de entorno portable...")
+            self.progreso.emit(0)
+            
+            # Extracción del ZIP
+            with zipfile.ZipFile(self.destino_zip, 'r') as zip_ref:
+                lista_archivos = zip_ref.namelist()
+                total_archivos = len(lista_archivos)
+                
+                # Crear el directorio raíz de extracción si no existe
+                if not os.path.exists(self.carpeta_extraccion):
+                    os.makedirs(self.carpeta_extraccion)
+
+                for i, archivo in enumerate(lista_archivos):
+                    zip_ref.extract(archivo, self.carpeta_extraccion)
+                    if total_archivos > 0:
+                        self.progreso.emit(int(((i + 1) / total_archivos) * 100))
+
+            # Limpieza del instalador comprimido temporal
+            if os.path.exists(self.destino_zip):
+                os.remove(self.destino_zip)
+
+            self.finalizado.emit(True, "Java instalado y configurado correctamente.")
+        except Exception as e:
+            self.finalizado.emit(False, str(e))
+
+
 class ConsoleWindow(QDialog):
-    """Ventana independiente para la terminal del servidor."""
+    """Ventana independiente para la terminal del servidor con botón de detención."""
+    solicitar_stop = pyqtSignal()
+
     def __init__(self, nombre_instancia, parent=None):
         super().__init__(parent)
         self.setWindowTitle(f"Terminal del Servidor - {nombre_instancia}")
-        self.resize(800, 500)
+        self.resize(850, 530)
         self.setWindowFlags(self.windowFlags() | Qt.WindowType.WindowMinMaxButtonsHint)
 
         self.consola = QPlainTextEdit()
@@ -41,35 +107,71 @@ class ConsoleWindow(QDialog):
             }
         """)
 
+        # Botón dedicado para apagar el servidor directamente desde aquí
+        self.btn_stop_consola = QPushButton("🛑 Detener Servidor")
+        self.btn_stop_consola.setStyleSheet("""
+            QPushButton {
+                background-color: #a61c1c;
+                color: white;
+                font-weight: bold;
+                padding: 6px 12px;
+                border-radius: 4px;
+            }
+            QPushButton:hover { background-color: #cc2424; }
+        """)
+        self.btn_stop_consola.clicked.connect(self.solicitar_stop.emit)
+
+        layout_comandos = QHBoxLayout()
+        layout_comandos.addWidget(self.input_comando, stretch=4)
+        layout_comandos.addWidget(self.btn_stop_consola, stretch=1)
+
         layout = QVBoxLayout()
         layout.addWidget(QLabel(f"Consola activa: {nombre_instancia}"))
         layout.addWidget(self.consola)
-        layout.addWidget(self.input_comando)
+        layout.addLayout(layout_comandos)
         self.setLayout(layout)
 
 
 class ConfigGlobalDialog(QDialog):
     def __init__(self, ruta_instancias, ruta_javas_raiz, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Configuración General")
-        self.resize(600, 180)
+        self.setWindowTitle("Configuración General y Gestor de Java")
+        self.resize(650, 380)
         
         self.ruta_instancias = ruta_instancias
         self.ruta_javas_raiz = ruta_javas_raiz
+        self.worker = None
 
+        # --- SECCIÓN CARPETAS ---
         self.lbl_instancias = QLabel("Ruta raíz de la carpeta de Instancias:")
         self.txt_instancias = QLineEdit(self.ruta_instancias)
         self.txt_instancias.setReadOnly(True)
         self.btn_buscar_instancias = QPushButton("Examinar...")
 
-        self.lbl_javas_raiz = QLabel("Carpeta raíz de entornos Java (subcarpetas de Java):")
+        self.lbl_javas_raiz = QLabel("Carpeta raíz de entornos Java (Portables):")
         self.txt_javas_raiz = QLineEdit(self.ruta_javas_raiz)
         self.txt_javas_raiz.setReadOnly(True)
         self.btn_buscar_javas = QPushButton("Examinar...")
 
-        self.btn_guardar = QPushButton("Guardar")
+        # --- SECCIÓN GESTOR DE DESCARGAS JAVA ---
+        self.lbl_downloader = QLabel("📥 Descargar versiones de Java Runtime portables necesarias:")
+        self.lbl_downloader.setStyleSheet("font-weight: bold; margin-top: 10px;")
+        
+        self.combo_descargas = QComboBox()
+        # URLs oficiales pre-configuradas para descargas portables de Eclipse Temurin (Windows x64)
+        self.combo_descargas.addItem("Java 8 (Recomendado para servidores Minecraft antiguos 1.7 - 1.12)", "https://github.com/adoptium/temurin8-binaries/releases/download/jdk8u412-b08/OpenJDK8U-jdk_x64_windows_hotspot_8u412b08.zip")
+        self.combo_descargas.addItem("Java 17 (Recomendado para servidores de versiones 1.17 a 1.20.4)", "https://github.com/adoptium/temurin17-binaries/releases/download/jdk-17.0.11%2B9/OpenJDK17U-jdk_x64_windows_hotspot_17.0.11_9.zip")
+        self.combo_descargas.addItem("Java 21 (Recomendado para servidores modernos 1.20.5+ y superiores)", "https://github.com/adoptium/temurin21-binaries/releases/download/jdk-21.0.3%2B9/OpenJDK21U-jdk_x64_windows_hotspot_21.0.3_9.zip")
+
+        self.btn_descargar_java = QPushButton("⚡ Descargar e Instalar")
+        self.lbl_estado_descarga = QLabel("Estado: Esperando acción...")
+        self.barra_progreso = QProgressBar()
+        self.barra_progreso.setValue(0)
+
+        self.btn_guardar = QPushButton("Guardar y Cerrar")
         self.btn_cancelar = QPushButton("Cancelar")
 
+        # Layouts
         layout_instancias = QHBoxLayout()
         layout_instancias.addWidget(self.txt_instancias)
         layout_instancias.addWidget(self.btn_buscar_instancias)
@@ -77,6 +179,10 @@ class ConfigGlobalDialog(QDialog):
         layout_javas = QHBoxLayout()
         layout_javas.addWidget(self.txt_javas_raiz)
         layout_javas.addWidget(self.btn_buscar_javas)
+
+        layout_dl_controles = QHBoxLayout()
+        layout_dl_controles.addWidget(self.combo_descargas)
+        layout_dl_controles.addWidget(self.btn_descargar_java)
 
         layout_botones = QHBoxLayout()
         layout_botones.addStretch()
@@ -86,15 +192,24 @@ class ConfigGlobalDialog(QDialog):
         layout_principal = QVBoxLayout()
         layout_principal.addWidget(self.lbl_instancias)
         layout_principal.addLayout(layout_instancias)
-        layout_principal.addSpacing(10)
+        layout_principal.addSpacing(5)
         layout_principal.addWidget(self.lbl_javas_raiz)
         layout_principal.addLayout(layout_javas)
-        layout_principal.addSpacing(15)
+        
+        layout_principal.addSpacing(10)
+        layout_principal.addWidget(self.lbl_downloader)
+        layout_principal.addLayout(layout_dl_controles)
+        layout_principal.addWidget(self.lbl_estado_descarga)
+        layout_principal.addWidget(self.barra_progreso)
+        
+        layout_principal.addSpacing(20)
         layout_principal.addLayout(layout_botones)
         self.setLayout(layout_principal)
 
+        # Conexiones
         self.btn_buscar_instancias.clicked.connect(self.seleccionar_instancias)
         self.btn_buscar_javas.clicked.connect(self.seleccionar_carpeta_javas)
+        self.btn_descargar_java.clicked.connect(self.iniciar_descarga_java)
         self.btn_guardar.clicked.connect(self.accept)
         self.btn_cancelar.clicked.connect(self.reject)
 
@@ -109,6 +224,36 @@ class ConfigGlobalDialog(QDialog):
         if carpeta:
             self.ruta_javas_raiz = carpeta
             self.txt_javas_raiz.setText(carpeta)
+
+    def iniciar_descarga_java(self):
+        if not self.ruta_javas_raiz or not os.path.exists(self.ruta_javas_raiz):
+            QMessageBox.warning(self, "Error de Destino", "Por favor, selecciona primero una carpeta raíz de entornos Java válida.")
+            return
+
+        url = self.combo_descargas.currentData()
+        nombre_zip = "temp_java_download.zip"
+        destino_zip = os.path.join(self.ruta_javas_raiz, nombre_zip)
+        
+        self.btn_descargar_java.setEnabled(False)
+        self.combo_descargas.setEnabled(False)
+
+        # Iniciar Worker en hilo separado para no bloquear la GUI
+        self.worker = DownloaderWorker(url, destino_zip, self.ruta_javas_raiz)
+        self.worker.progreso.connect(self.barra_progreso.setValue)
+        self.worker.estado.connect(self.lbl_estado_descarga.setText)
+        self.worker.finalizado.connect(self.descarga_completada)
+        self.worker.start()
+
+    def descarga_completada(self, exito, mensaje):
+        self.btn_descargar_java.setEnabled(True)
+        self.combo_descargas.setEnabled(True)
+        self.barra_progreso.setValue(100 if exito else 0)
+        if exito:
+            self.lbl_estado_descarga.setText("Estado: ¡Instalación completada exitosamente!")
+            QMessageBox.information(self, "Proceso Finalizado", mensaje)
+        else:
+            self.lbl_estado_descarga.setText("Estado: Error durante la instalación.")
+            QMessageBox.critical(self, "Error de Descarga", f"Ocurrió un problema: {mensaje}")
 
 
 class ConfigInstanciaDialog(QDialog):
@@ -190,7 +335,6 @@ class ConfigInstanciaDialog(QDialog):
         )
         if archivo:
             try:
-                import shutil
                 destino = os.path.join(self.ruta_instancia, "icon.png")
                 shutil.copy(archivo, destino)
                 self.txt_icon.setText("icon.png (Actualizado)")
@@ -264,7 +408,7 @@ class ServerLauncher(QMainWindow):
         
         self.btn_iniciar = QPushButton("🚀 Iniciar Servidor")
         self.btn_config_instancia = QPushButton("🛠️ Configurar Instancia")
-        self.btn_config_global = QPushButton("⚙️ Configuración General")
+        self.btn_config_global = QPushButton("⚙️ Configuración General / Javas")
         
         estilo_botones = "QPushButton { padding: 8px; font-size: 10pt; font-weight: bold; }"
         self.btn_iniciar.setStyleSheet(estilo_botones)
@@ -315,7 +459,13 @@ class ServerLauncher(QMainWindow):
             self.ruta_instancias = os.path.join(os.path.dirname(__file__), "instancias")
             if not os.path.exists(self.ruta_instancias):
                 os.makedirs(self.ruta_instancias)
-            self.guardar_configuracion_global()
+        
+        if not self.ruta_javas_raiz:
+            self.ruta_javas_raiz = os.path.join(os.path.dirname(__file__), "javas")
+            if not os.path.exists(self.ruta_javas_raiz):
+                os.makedirs(self.ruta_javas_raiz)
+                
+        self.guardar_configuracion_global()
 
     def guardar_configuracion_global(self):
         data = {"ruta_instancias": self.ruta_instancias, "ruta_javas_raiz": self.ruta_javas_raiz}
@@ -400,7 +550,6 @@ class ServerLauncher(QMainWindow):
     def detectar_version_java_de_jar(self, ruta_jar):
         if not os.path.exists(ruta_jar): return 17
         try:
-            import zipfile
             with zipfile.ZipFile(ruta_jar, 'r') as z:
                 for name in z.namelist():
                     if name.endswith('.class'):
@@ -416,11 +565,14 @@ class ServerLauncher(QMainWindow):
     def escanear_versiones_en_carpeta_javas(self):
         javas_disponibles = {}
         if not self.ruta_javas_raiz or not os.path.exists(self.ruta_javas_raiz): return javas_disponibles
-        for item in os.listdir(self.ruta_javas_raiz):
-            ruta_exe = os.path.join(self.ruta_javas_raiz, item, "bin", "java.exe")
-            if os.path.exists(ruta_exe):
+        
+        # Escaneo recursivo para buscar ejecutables java.exe (soporta la extracción directa de carpetas comprimidas)
+        for raiz, directorios, archivos in os.walk(self.ruta_javas_raiz):
+            if "java.exe" in archivos:
+                ruta_exe = os.path.join(raiz, "java.exe")
                 v = self.obtener_version_de_binario(ruta_exe)
-                if v: javas_disponibles[v] = ruta_exe
+                if v: 
+                    javas_disponibles[v] = ruta_exe
         return javas_disponibles
 
     def obtener_version_de_binario(self, ruta_exe):
@@ -448,6 +600,12 @@ class ServerLauncher(QMainWindow):
         if diccionario_javas: return diccionario_javas[sorted(diccionario_javas.keys(), reverse=True)[0]]
         return None
 
+    def detener_servidor_desde_consola(self):
+        if self.proceso_server.state() == QProcess.ProcessState.Running:
+            if self.ventana_consola:
+                self.ventana_consola.consola.appendPlainText("\n[Launcher] Detención solicitada desde la terminal externa...")
+            self.proceso_server.write(b"stop\n")
+
     def controlar_servidor(self):
         if self.proceso_server.state() == QProcess.ProcessState.NotRunning:
             item_seleccionado = self.lista_servidores.currentItem()
@@ -460,15 +618,23 @@ class ServerLauncher(QMainWindow):
             if java_especifico == "AUTO" or not java_especifico:
                 java_exe_real = self.seleccionar_mejor_java(ruta_servidor)
             else:
-                java_exe_real = os.path.join(self.ruta_javas_raiz, java_especifico, "bin", "java.exe")
+                # Buscar dinámicamente si existe la subcarpeta específica
+                java_exe_real = None
+                for raiz, _, archivos in os.walk(os.path.join(self.ruta_javas_raiz, java_especifico)):
+                    if "java.exe" in archivos:
+                        java_exe_real = os.path.join(raiz, "java.exe")
+                        break
 
-            if not java_exe_real or not ejecutable: return
+            if not java_exe_real or not ejecutable: 
+                QMessageBox.critical(self, "Falta Entorno", "No se pudo localizar un ejecutable válido de Java para esta instancia. Ve a Configuración General y descarga una versión compatible.")
+                return
 
             self.instancia_actual = nombre_carpeta
 
             self.ventana_consola = ConsoleWindow(nombre_carpeta, self)
-            self.ventana_consola.consola.appendPlainText(f"[Launcher] Lanzando instancia en modo silencioso (NOGUI)...")
+            self.ventana_consola.consola.appendPlainText(f"[Launcher] Iniciando con binario: {java_exe_real}")
             self.ventana_consola.input_comando.returnPressed.connect(self.enviar_comando_servidor)
+            self.ventana_consola.solicitar_stop.connect(self.detener_servidor_desde_consola)
             self.ventana_consola.show()
 
             env = QProcessEnvironment.systemEnvironment()
@@ -487,9 +653,7 @@ class ServerLauncher(QMainWindow):
             self.proceso_server.start(comando, argumentos)
             self.btn_iniciar.setText("🛑 Detener Servidor Seleccionado")
         else:
-            if self.ventana_consola:
-                self.ventana_consola.consola.appendPlainText("\n[Launcher] Enviando comando 'stop'...")
-            self.proceso_server.write(b"stop\n")
+            self.detener_servidor_desde_consola()
 
     def enviar_comando_servidor(self):
         if not self.ventana_consola: return
@@ -507,17 +671,14 @@ class ServerLauncher(QMainWindow):
             texto = data.decode("cp1252", errors="replace")
         
         if self.ventana_consola:
-            # --- EVITAR QUEDARSE TRABADO EN EL PAUSE ---
             if "Presione una tecla para continuar" in texto:
-                # Si el script manda el pause, le mandamos un Enter virtual automáticamente
                 self.proceso_server.write(b"\n")
             else:
                 self.ventana_consola.consola.appendPlainText(texto.rstrip())
 
     def servidor_terminado(self):
-        # --- CIERRE AUTOMÁTICO DE LA VENTANA ---
         if self.ventana_consola:
-            self.ventana_consola.close()  # Cierra la ventana flotante inmediatamente de forma limpia
+            self.ventana_consola.close()
             self.ventana_consola = None
         
         self.btn_iniciar.setText("🚀 Iniciar Servidor")
