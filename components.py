@@ -12,8 +12,8 @@ from PyQt6.QtWidgets import (QDialog, QPlainTextEdit, QLineEdit, QPushButton,
                              QHBoxLayout, QVBoxLayout, QLabel, QComboBox, 
                              QProgressBar, QMessageBox, QFileDialog, QListWidget, QListWidgetItem)
 from PyQt6.QtCore import Qt, pyqtSignal, QRegularExpression
-from PyQt6.QtGui import QSyntaxHighlighter, QTextCharFormat, QColor
-from workers import DownloaderWorker, FTBDownloadWorker
+from PyQt6.QtGui import QSyntaxHighlighter, QTextCharFormat, QColor, QIcon
+from workers import DownloaderWorker, FTBDownloadWorker, ZipExtractionWorker
 
 class LogHighlighter(QSyntaxHighlighter):
     def __init__(self, parent):
@@ -760,3 +760,75 @@ class FTBDownloaderDialog(QDialog):
             self.accept()
         else:
             QMessageBox.critical(self, "Error de Instalación FTB", f"No se pudo completar la instalación:\n{mensaje}")
+
+class ZipInstallerDialog(QDialog):
+    def __init__(self, zip_path, destination_root_path, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("📦 Instalar Servidor desde Archivo ZIP")
+        self.resize(450, 250)
+        self.zip_path = zip_path
+        self.destination_root_path = destination_root_path
+        self.instance_name = ""
+        self.worker = None
+
+        self.lbl_zip_file = QLabel(f"Archivo ZIP seleccionado: <b>{os.path.basename(zip_path)}</b>")
+        self.lbl_instance_name = QLabel("Nombre para la nueva instancia (carpeta):")
+        self.txt_instance_name = QLineEdit()
+        self.txt_instance_name.setPlaceholderText("Ej: MiServidorPersonalizado")
+        
+        self.btn_instalar = QPushButton("Instalar")
+        self.btn_cancelar = QPushButton("Cancelar")
+        
+        self.barra_progreso = QProgressBar()
+        self.barra_progreso.setValue(0)
+        self.lbl_estado = QLabel("Estado: Esperando nombre de instancia...")
+
+        layout_botones = QHBoxLayout()
+        layout_botones.addStretch()
+        layout_botones.addWidget(self.btn_instalar)
+        layout_botones.addWidget(self.btn_cancelar)
+
+        layout_principal = QVBoxLayout()
+        layout_principal.addWidget(self.lbl_zip_file)
+        layout_principal.addSpacing(10)
+        layout_principal.addWidget(self.lbl_instance_name)
+        layout_principal.addWidget(self.txt_instance_name)
+        layout_principal.addSpacing(20)
+        layout_principal.addWidget(self.lbl_estado)
+        layout_principal.addWidget(self.barra_progreso)
+        layout_principal.addSpacing(20)
+        layout_principal.addLayout(layout_botones)
+        self.setLayout(layout_principal)
+
+        self.btn_instalar.clicked.connect(self.iniciar_instalacion_zip)
+        self.btn_cancelar.clicked.connect(self.reject)
+
+    def iniciar_instalacion_zip(self):
+        self.instance_name = self.txt_instance_name.text().strip()
+        if not self.instance_name:
+            QMessageBox.warning(self, "Nombre de Instancia", "Por favor, ingresa un nombre para la instancia.")
+            return
+        
+        invalid_chars = '<>:"/\\|?*'
+        if any(c in self.instance_name for c in invalid_chars):
+            QMessageBox.warning(self, "Nombre inválido", f"El nombre contiene caracteres no permitidos: {invalid_chars}")
+            return
+
+        self.btn_instalar.setEnabled(False)
+        self.txt_instance_name.setReadOnly(True)
+        
+        self.worker = ZipExtractionWorker(self.zip_path, self.instance_name, self.destination_root_path)
+        self.worker.progreso.connect(self.barra_progreso.setValue)
+        self.worker.estado.connect(self.lbl_estado.setText)
+        self.worker.finalizado.connect(self.instalacion_zip_finalizada)
+        self.worker.start()
+
+    def instalacion_zip_finalizada(self, success, message, instance_path):
+        self.btn_instalar.setEnabled(True)
+        self.txt_instance_name.setReadOnly(False)
+        if success:
+            self.accept()
+        else:
+            QMessageBox.critical(self, "Error de Instalación ZIP", message)
+            self.barra_progreso.setValue(0)
+            self.lbl_estado.setText("Estado: Falló la instalación.")

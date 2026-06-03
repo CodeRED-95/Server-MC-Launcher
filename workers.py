@@ -1,5 +1,6 @@
 # workers.py
 import os
+import json
 import zipfile
 import re
 import time
@@ -61,6 +62,47 @@ class DownloaderWorker(QThread):
                 try: os.remove(self.destino_zip)
                 except Exception: pass
             self.finalizado.emit(False, str(e))
+
+class ZipExtractionWorker(QThread):
+    progreso = pyqtSignal(int)
+    estado = pyqtSignal(str)
+    finalizado = pyqtSignal(bool, str, str) # success, message, instance_path
+
+    def __init__(self, zip_path, instance_name, destination_root_path):
+        super().__init__()
+        self.zip_path = zip_path
+        self.instance_name = instance_name
+        self.destination_root_path = destination_root_path
+        self.instance_path = os.path.join(self.destination_root_path, self.instance_name)
+
+    def run(self):
+        try:
+            if os.path.exists(self.instance_path):
+                self.finalizado.emit(False, f"La carpeta '{self.instance_name}' ya existe.", "")
+                return
+
+            os.makedirs(self.instance_path)
+            self.estado.emit(f"Descomprimiendo '{os.path.basename(self.zip_path)}' en '{self.instance_name}'...")
+            self.progreso.emit(0)
+
+            with zipfile.ZipFile(self.zip_path, 'r') as zip_ref:
+                file_list = zip_ref.namelist()
+                total_files = len(file_list)
+                
+                for i, file in enumerate(file_list):
+                    zip_ref.extract(file, self.instance_path)
+                    porcentaje = int((i / total_files) * 90)
+                    self.progreso.emit(porcentaje)
+
+            # Crear config_instancia.json
+            config_data = {"archivo_arranque": "startserver.bat", "java_especifico": "AUTO"}
+            with open(os.path.join(self.instance_path, "config_instancia.json"), "w", encoding="utf-8") as f:
+                json.dump(config_data, f, indent=4)
+
+            self.progreso.emit(100)
+            self.finalizado.emit(True, "Servidor ZIP instalado correctamente.", self.instance_path)
+        except Exception as e:
+            self.finalizado.emit(False, f"Error al instalar desde ZIP: {e}", "")
 
 
 class FTBDownloadWorker(QThread):

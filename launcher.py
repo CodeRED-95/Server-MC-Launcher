@@ -4,13 +4,13 @@ import json
 import struct
 import zipfile
 import ctypes
-from PyQt6.QtWidgets import (QMainWindow, QPushButton, QVBoxLayout, QHBoxLayout, 
+from PyQt6.QtWidgets import (QMainWindow, QPushButton, QVBoxLayout, QHBoxLayout,
                              QWidget, QListWidget, QListWidgetItem, QLabel, 
-                             QDialog, QMessageBox)
+                             QDialog, QMessageBox, QFileDialog)
 from PyQt6.QtCore import QProcess, QProcessEnvironment, Qt, QSize, QFileSystemWatcher
 from PyQt6.QtGui import QIcon
 
-from components import ConsoleWindow, ConfigGlobalDialog, ConfigInstanciaDialog, FTBDownloaderDialog
+from components import ConsoleWindow, ConfigGlobalDialog, ConfigInstanciaDialog, FTBDownloaderDialog, ZipInstallerDialog
 
 class ServerLauncher(QMainWindow):
     def __init__(self):
@@ -50,18 +50,22 @@ class ServerLauncher(QMainWindow):
         self.btn_config_instancia = QPushButton("🛠️ Configurar Instancia")
         self.btn_config_global = QPushButton("⚙️ Ajustes / Java")
         self.btn_descargar_ftb = QPushButton("🔥 Descargar FTB")
+        self.btn_instalar_zip = QPushButton("📦 Instalar desde ZIP")
         
         estilo_botones = "QPushButton { padding: 8px; font-size: 10pt; font-weight: bold; }"
         self.btn_iniciar.setStyleSheet(estilo_botones)
         self.btn_config_instancia.setStyleSheet(estilo_botones)
         self.btn_config_global.setStyleSheet(estilo_botones)
         self.btn_descargar_ftb.setStyleSheet(estilo_botones)
+        self.btn_instalar_zip.setStyleSheet(estilo_botones)
+
 
         layout_botones = QHBoxLayout()
         layout_botones.addWidget(self.btn_iniciar, stretch=2)
         layout_botones.addWidget(self.btn_config_instancia, stretch=1)
         layout_botones.addWidget(self.btn_config_global, stretch=1)
         layout_botones.addWidget(self.btn_descargar_ftb, stretch=1)
+        layout_botones.addWidget(self.btn_instalar_zip, stretch=1)
 
         layout_principal = QVBoxLayout()
         layout_principal.addWidget(self.lbl_instancias)
@@ -82,6 +86,7 @@ class ServerLauncher(QMainWindow):
         self.btn_config_global.clicked.connect(self.abrir_configuracion_global)
         self.btn_config_instancia.clicked.connect(self.abrir_configuracion_instancia)
         self.btn_descargar_ftb.clicked.connect(self.abrir_descargador_ftb)
+        self.btn_instalar_zip.clicked.connect(self.abrir_instalador_zip)
         self.lista_servidores.currentItemChanged.connect(self.actualizar_estado_botones)
         
         self.proceso_server.readyRead.connect(self.leer_consola)
@@ -225,6 +230,24 @@ class ServerLauncher(QMainWindow):
             dialogo.set_busqueda_inicial(busqueda)
         dialogo.exec() # El watcher actualizará la lista en cuanto se cree la carpeta de la instancia
 
+    def abrir_instalador_zip(self):
+        # 1. Seleccionar archivo ZIP
+        zip_file, _ = QFileDialog.getOpenFileName(
+            self, "Seleccionar Archivo ZIP del Servidor", "", "Archivos ZIP (*.zip);;Todos los archivos (*.*)"
+        )
+        if not zip_file: return
+
+        # 2. Abrir diálogo para nombre de instancia y descompresión
+        dialogo = ZipInstallerDialog(zip_file, self.ruta_instancias, self)
+        if dialogo.exec() == QDialog.DialogCode.Accepted:
+            QMessageBox.information(
+                self, "Instalación Completada",
+                f"La instancia '{dialogo.instance_name}' ha sido instalada correctamente desde el ZIP."
+            )
+            self.cargar_instancias()
+        else:
+            QMessageBox.warning(self, "Instalación Cancelada", "La instalación desde ZIP fue cancelada o falló.")
+
     def cargar_instancias(self):
         self.lista_servidores.clear()
         if os.path.exists(self.ruta_instancias):
@@ -249,22 +272,33 @@ class ServerLauncher(QMainWindow):
         self.btn_config_instancia.setEnabled(tiene_seleccion and not en_ejecucion)
         self.btn_config_global.setEnabled(not en_ejecucion)
         self.btn_descargar_ftb.setEnabled(not en_ejecucion)
+        self.btn_instalar_zip.setEnabled(not en_ejecucion)
         self.lista_servidores.setEnabled(not en_ejecucion)
 
     def detectar_version_java_de_jar(self, ruta_jar):
+        """Detecta la versión de Java escaneando las clases del JAR y tomando la más alta requerida."""
         if not os.path.exists(ruta_jar): return 17
+        max_java = 8
         try:
             with zipfile.ZipFile(ruta_jar, 'r') as z:
+                count = 0
                 for name in z.namelist():
                     if name.endswith('.class'):
                         with z.open(name) as f:
-                            magic = f.read(4)
-                            if magic == b'\xca\xfe\xba\xbe':
-                                minor, major = struct.unpack('>HH', f.read(4))
-                                mapa = {52: 8, 53: 9, 54: 10, 55: 11, 56: 12, 57: 13, 58: 14, 59: 15, 60: 16, 61: 17, 62: 18, 63: 19, 64: 20, 65: 21, 66: 22}
-                                return mapa.get(major, 17)
-        except Exception: pass
-        return 17
+                            if f.read(4) == b'\xca\xfe\xba\xbe':
+                                f.read(2) # minor
+                                major = struct.unpack('>H', f.read(2))[0]
+                                java_v = major - 44 # 52=8, 61=17, 65=21...
+                                if java_v > max_java: max_java = java_v
+                        count += 1
+                        if count > 50: break # Escaneamos una muestra para no penalizar el rendimiento
+            
+            # Ajustamos a las versiones estándar de Minecraft
+            if max_java <= 8: return 8
+            if max_java <= 17: return 17
+            return 21
+        except Exception: 
+            return 17
 
     def escanear_versiones_en_carpeta_javas(self):
         javas_disponibles = {}
@@ -323,6 +357,10 @@ class ServerLauncher(QMainWindow):
 
     def seleccionar_mejor_java(self, ruta_servidor):
         version_requerida = 17
+        
+        # Si existe user_jvm_args.txt, es un servidor de Forge 1.17+ (Requiere 17 o 21)
+        es_forge_moderno = os.path.exists(os.path.join(ruta_servidor, "user_jvm_args.txt"))
+
         jar_principal = os.path.join(ruta_servidor, "server.jar")
         if not os.path.exists(jar_principal):
             for f in os.listdir(ruta_servidor):
@@ -332,6 +370,10 @@ class ServerLauncher(QMainWindow):
                     
         if os.path.exists(jar_principal):
             version_requerida = self.detectar_version_java_de_jar(jar_principal)
+            
+        # Si es Forge moderno, nunca permitimos bajar de Java 17
+        if es_forge_moderno and version_requerida < 17:
+            version_requerida = 17
             
         diccionario_javas = self.escanear_versiones_en_carpeta_javas()
         if not diccionario_javas: return f"ERROR_VACIO:{version_requerida}"
@@ -468,6 +510,16 @@ class ServerLauncher(QMainWindow):
                 self.ventana_consola.btn_stop_consola.clicked.disconnect()
                 self.ventana_consola.btn_stop_consola.clicked.connect(self.ventana_consola.close)
             except: pass
+
+        # Lógica de transición post-instalación (ZIP): de startserver.bat a run.bat
+        if self.instancia_actual:
+            ruta_servidor = os.path.join(self.ruta_instancias, self.instancia_actual)
+            archivo_actual, java_actual = self.obtener_datos_instancia(ruta_servidor)
+            if archivo_actual == "startserver.bat":
+                if os.path.exists(os.path.join(ruta_servidor, "run.bat")):
+                    self.guardar_datos_instancia(ruta_servidor, "run.bat", java_actual)
+                    if self.ventana_consola:
+                        self.ventana_consola.consola.appendPlainText("\n[Launcher] Configuración de arranque actualizada: se detectó 'run.bat' tras la instalación.")
 
         self.btn_iniciar.setText("🚀 Iniciar Servidor")
         self.instancia_actual = None
