@@ -1,7 +1,9 @@
 # components.py
 import os
 import shutil
+import stat
 import json
+import re
 import urllib.request
 import urllib.parse
 import urllib.error
@@ -259,6 +261,7 @@ class ConfigGlobalDialog(QDialog):
 
 class ConfigInstanciaDialog(QDialog):
     instancia_eliminada = pyqtSignal()
+    solicitar_actualizacion = pyqtSignal(str, str, str) # nombre, modpack_id, version_id
 
     def __init__(self, nombre_instancia, ruta_instancia, archivo_actual, java_actual, ruta_javas_raiz, parent=None):
         super().__init__(parent)
@@ -267,6 +270,21 @@ class ConfigInstanciaDialog(QDialog):
         self.archivo_seleccionado = archivo_actual
         self.java_seleccionado = java_actual
         self.ruta_javas_raiz = ruta_javas_raiz
+
+        self.ftb_nombre_real = ""
+        self.ftb_modpack_id = ""
+        ruta_json = os.path.join(self.ruta_instancia, "config_instancia.json")
+        if os.path.exists(ruta_json):
+            try:
+                with open(ruta_json, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    self.ftb_nombre_real = data.get("ftb_nombre_real", "")
+                    self.ftb_modpack_id = data.get("ftb_modpack_id", "")
+            except Exception: pass
+
+        # Si no hay datos en el JSON, intentamos recuperarlos del LOG del instalador
+        if not self.ftb_modpack_id:
+            self.intentar_recuperar_metadatos_log()
 
         self.setWindowTitle(f"Configurar Instancia: {nombre_instancia}")
         self.resize(600, 360)
@@ -292,6 +310,14 @@ class ConfigInstanciaDialog(QDialog):
         if os.path.exists(ruta_icon_json):
             self.txt_icon.setText("icon.png (Personalizado Detectado)")
 
+        self.btn_actualizar = QPushButton("🔄 Actualizar Modpack")
+        self.btn_actualizar.setEnabled(bool(self.ftb_modpack_id))
+        self.btn_actualizar.setStyleSheet("""
+            QPushButton { background-color: #0d9488; color: white; font-weight: bold; padding: 6px 15px; border-radius: 4px; }
+            QPushButton:hover { background-color: #0f766e; }
+            QPushButton:disabled { background-color: #4b5563; }
+        """)
+
         self.btn_eliminar = QPushButton("🗑️ Eliminar Instancia")
         self.btn_eliminar.setStyleSheet("""
             QPushButton { background-color: #a61c1c; color: white; font-weight: bold; padding: 6px 15px; border-radius: 4px; }
@@ -311,6 +337,7 @@ class ConfigInstanciaDialog(QDialog):
 
         layout_botones = QHBoxLayout()
         layout_botones.addWidget(self.btn_eliminar)
+        layout_botones.addWidget(self.btn_actualizar)
         layout_botones.addStretch()
         layout_botones.addWidget(self.btn_guardar)
         layout_botones.addWidget(self.btn_cancelar)
@@ -334,10 +361,45 @@ class ConfigInstanciaDialog(QDialog):
         self.btn_buscar_archivo.clicked.connect(self.seleccionar_archivo)
         self.btn_buscar_icon.clicked.connect(self.seleccionar_icono)
         self.btn_eliminar.clicked.connect(self.eliminar_instancia_con_confirmacion)
+        self.btn_actualizar.clicked.connect(self.preparar_actualizacion)
         self.btn_guardar.clicked.connect(self.accept)
         self.btn_cancelar.clicked.connect(self.reject)
 
         self.cargar_combo_javas()
+
+    def intentar_recuperar_metadatos_log(self):
+        """Analiza el archivo log de FTB para recuperar el nombre e ID del modpack."""
+        ruta_log = os.path.join(self.ruta_instancia, "ftb-server-installer.log")
+        if not os.path.exists(ruta_log): return
+        try:
+            with open(ruta_log, "r", encoding="utf-8", errors="ignore") as f:
+                contenido = f.read()
+                # Buscamos Nombre e ID permitiendo saltos de línea y espacios (común en FTB Installer)
+                # Buscamos el patrón: Name: ... (ID)
+                m_mp = re.search(r"Name:\s*([\w\s\-\.]+?)\s*\((\d+)\)", contenido, re.MULTILINE)
+                if m_mp:
+                    self.ftb_nombre_real = m_mp.group(1).strip()
+                    self.ftb_modpack_id = m_mp.group(2)
+                
+                # Intentamos también sacar el ID de versión si está ahí para mayor precisión
+                m_v = re.search(r"Version:\s+.*?\s+\((\d+)\)", contenido)
+                if m_v: self.version_log_id = m_v.group(1)
+        except: pass
+
+    def parsear_version_log(self):
+        """Lee el log del instalador para extraer el ID de la versión instalada."""
+        ruta_log = os.path.join(self.ruta_instancia, "ftb-server-installer.log")
+        if not os.path.exists(ruta_log): return ""
+        try:
+            with open(ruta_log, "r", encoding="utf-8", errors="ignore") as f:
+                contenido = f.read()
+                match = re.search(r"Version:\s+.*?\s+\((\d+)\)", contenido)
+                return match.group(1) if match else ""
+        except: return ""
+
+    def preparar_actualizacion(self):
+        version_actual = self.parsear_version_log()
+        self.solicitar_actualizacion.emit(self.ftb_nombre_real, str(self.ftb_modpack_id), version_actual)
 
     def seleccionar_archivo(self):
         archivo, _ = QFileDialog.getOpenFileName(
@@ -360,6 +422,11 @@ class ConfigInstanciaDialog(QDialog):
             except Exception as e:
                 self.txt_icon.setText(f"Error al copiar: {e}")
 
+    def _handle_remove_readonly(self, func, path, excinfo):
+        """Manejador de errores para shutil.rmtree que quita el atributo de solo lectura."""
+        os.chmod(path, stat.S_IWRITE)
+        func(path)
+
     def eliminar_instancia_con_confirmacion(self):
         confirmacion = QMessageBox.question(
             self, "Confirmar Eliminación", 
@@ -370,12 +437,22 @@ class ConfigInstanciaDialog(QDialog):
         if confirmacion == QMessageBox.StandardButton.Yes:
             try:
                 if os.path.exists(self.ruta_instancia):
-                    shutil.rmtree(self.ruta_instancia)
+                    # Intentamos eliminar manejando archivos de solo lectura (común en JREs)
+                    shutil.rmtree(self.ruta_instancia, onerror=self._handle_remove_readonly)
+                
                 QMessageBox.information(self, "Eliminado", "La instancia fue eliminada.")
                 self.instancia_eliminada.emit()
                 self.reject()
             except Exception as e:
-                QMessageBox.critical(self, "Error", f"No se pudo eliminar:\n{e}")
+                error_msg = str(e)
+                if "Acceso denegado" in error_msg or "WinError 5" in error_msg:
+                    error_msg = (
+                        "Acceso Denegado. Esto suele ocurrir porque el servidor aún se está cerrando "
+                        "o hay un proceso de Java usando la carpeta.\n\n"
+                        "Por favor, asegúrate de que el servidor esté detenido y, si el error persiste, "
+                        "revisa el Administrador de Tareas para cerrar cualquier proceso 'java.exe' activo."
+                    )
+                QMessageBox.critical(self, "Error al eliminar", f"{error_msg}")
 
     def cargar_combo_javas(self):
         self.combo_java.clear()
@@ -424,12 +501,15 @@ class ConfigInstanciaDialog(QDialog):
 
 
 class FTBDownloaderDialog(QDialog):
-    def __init__(self, ruta_instancias_raiz, ruta_javas_raiz=None, parent=None):
+    def __init__(self, ruta_instancias_raiz, ruta_javas_raiz=None, ruta_update=None, modpack_id=None, version_actual=None, parent=None):
         super().__init__(parent)
         self.setWindowTitle("📥 Descargar Servidor Oficial FTB")
         self.resize(550, 420)
         self.ruta_instancias_raiz = ruta_instancias_raiz
         self.ruta_javas_raiz = ruta_javas_raiz if ruta_javas_raiz else os.path.join(os.getcwd(), "javas")
+        self.ruta_update = ruta_update
+        self.modpack_id_update = modpack_id
+        self.version_id_actual = version_actual
         self.worker = None
 
         self.lbl_buscar = QLabel("Buscar Modpack en Feed The Beast:")
@@ -483,13 +563,37 @@ class FTBDownloaderDialog(QDialog):
         self.btn_instalar.clicked.connect(self.iniciar_descarga_ftb)
         self.btn_enviar_interaccion.clicked.connect(self.enviar_comando_manual)
         self.input_interaccion.returnPressed.connect(self.enviar_comando_manual)
-        self.cargar_catalogo_predeterminado()
+        
+        if self.modpack_id_update:
+            self.cargar_modpack_especifico(self.modpack_id_update)
+        else:
+            self.cargar_catalogo_predeterminado()
+
+    def set_busqueda_inicial(self, texto):
+        self.txt_buscar.setText(texto)
+        self.buscar_modpack_api()
 
     def cargar_catalogo_predeterminado(self):
         self.lbl_estado.setText("Cargando catálogo de servidores populares...")
         self.lista_resultados.clear()
         url_popular = "https://api.feed-the-beast.com/v1/modpacks/public/modpack/popular/installs/12"
         self._ejecutar_consulta_api(url_popular, es_busqueda=False)
+
+    def cargar_modpack_especifico(self, modpack_id):
+        self.lbl_estado.setText("Buscando actualizaciones disponibles...")
+        url = f"https://api.feed-the-beast.com/v1/modpacks/public/modpack/{modpack_id}"
+        try:
+            req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+            with urllib.request.urlopen(req, timeout=10) as response:
+                detalles = json.loads(response.read().decode('utf-8'))
+                if "name" in detalles:
+                    self.lista_resultados.clear()
+                    item = QListWidgetItem(detalles["name"] + " (Actualización detectada)")
+                    item.setData(Qt.ItemDataRole.UserRole, detalles)
+                    self.lista_resultados.addItem(item)
+                    self.lista_resultados.setCurrentItem(item)
+        except Exception:
+            self.lbl_estado.setText("Error al cargar datos de actualización.")
 
     def buscar_modpack_api(self):
         termino = self.txt_buscar.text().strip()
@@ -542,9 +646,32 @@ class FTBDownloaderDialog(QDialog):
         if not item: return
         detalles = item.data(Qt.ItemDataRole.UserRole)
         versiones = detalles.get("versions", [])
-        for v in versiones:
-            self.combo_versiones.addItem(f"Versión: {v.get('name')}", v)
-        if versiones: self.btn_instalar.setEnabled(True)
+        
+        # Si estamos actualizando, filtramos para mostrar solo versiones posteriores
+        if self.version_id_actual:
+            try:
+                v_id_actual = int(self.version_id_actual)
+                idx_actual = -1
+                for i, v in enumerate(versiones):
+                    if v.get('id') == v_id_actual:
+                        idx_actual = i
+                        break
+                
+                if idx_actual != -1:
+                    # Las versiones posteriores (más nuevas) están después de la actual en la lista.
+                    versiones = versiones[idx_actual + 1:]
+                    # Revertimos para que la más reciente aparezca primero en el selector
+                    versiones.reverse()
+                    self.lbl_version.setText(f"Nuevas versiones (ID actual: {v_id_actual}):")
+            except: pass
+
+        if not versiones:
+            if self.version_id_actual: self.lbl_estado.setText("Ya tienes la versión más reciente instalada.")
+            self.btn_instalar.setEnabled(False)
+        else:
+            for v in versiones:
+                self.combo_versiones.addItem(f"Versión: {v.get('name')}", v)
+            self.btn_instalar.setEnabled(True)
 
     def iniciar_descarga_ftb(self):
         item_mp = self.lista_resultados.currentItem()
@@ -553,14 +680,40 @@ class FTBDownloaderDialog(QDialog):
 
         modpack_detalles = item_mp.data(Qt.ItemDataRole.UserRole)
         id_modpack = modpack_detalles["id"]
+        # Sanitizamos el nombre del modpack y la versión para el nombre de la carpeta
         nombre_modpack = modpack_detalles["name"].replace(" ", "_").replace("/", "_").replace(":", "_")
+        nombre_version = version_data["name"].replace(" ", "_").replace("/", "_").replace(":", "_")
         id_version = version_data["id"]
-        nombre_version = version_data["name"]
 
         # Usamos la URL oficial de la API v1 de FTB para el instalador de servidor en Windows
         url_descarga_exe = f"https://api.feed-the-beast.com/v1/modpacks/public/modpack/{id_modpack}/{id_version}/server/windows"
-        nombre_carpeta_final = f"FTB_{nombre_modpack}_{nombre_version}"
+        
+        # Definimos el nombre de la carpeta basado en modpack y versión
+        nombre_carpeta_final = f"{nombre_modpack}_{nombre_version}"
         ruta_instancia_destino = os.path.join(self.ruta_instancias_raiz, nombre_carpeta_final)
+
+        if self.ruta_update:
+            confirmacion = QMessageBox.warning(
+                self, "Confirmar Actualización",
+                f"Se actualizará la instancia a la versión {version_data['name']}.\n\n"
+                f"La carpeta se renombrará a: {nombre_carpeta_final}\n\n"
+                "⚠️ IMPORTANTE: Haz un backup de tu mundo antes de continuar.\n"
+                "¿Deseas proceder con la actualización?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+            )
+            if confirmacion == QMessageBox.StandardButton.No: return
+
+            # Si el nombre cambia, intentamos renombrar la carpeta existente antes de descargar
+            if self.ruta_update != ruta_instancia_destino:
+                if os.path.exists(ruta_instancia_destino):
+                    QMessageBox.critical(self, "Error", f"No se pudo renombrar porque ya existe una carpeta llamada '{nombre_carpeta_final}'.")
+                    return
+                try:
+                    os.rename(self.ruta_update, ruta_instancia_destino)
+                    self.ruta_update = ruta_instancia_destino
+                except Exception as e:
+                    QMessageBox.critical(self, "Error", f"No se pudo renombrar la carpeta para la actualización:\n{e}")
+                    return
 
         self.btn_instalar.setEnabled(False)
         self.btn_buscar.setEnabled(False)
@@ -571,7 +724,9 @@ class FTBDownloaderDialog(QDialog):
         self.worker.progreso.connect(self.barra_progreso.setValue)
         self.worker.estado.connect(self.lbl_estado.setText)
         self.worker.estado.connect(self.log_instalacion.appendPlainText)
-        self.worker.finalizado.connect(lambda exito, msg: self.instalacion_ftb_finalizada(exito, msg, ruta_instancia_destino, nombre_carpeta_final))
+        self.worker.finalizado.connect(lambda exito, msg: self.instalacion_ftb_finalizada(
+            exito, msg, ruta_instancia_destino, nombre_carpeta_final, modpack_detalles, id_modpack
+        ))
         self.worker.start()
 
     def enviar_comando_manual(self):
@@ -581,7 +736,7 @@ class FTBDownloaderDialog(QDialog):
             self.input_interaccion.clear()
             self.log_instalacion.appendPlainText(f"> Enviado al instalador: {comando}")
 
-    def instalacion_ftb_finalizada(self, exito, mensaje, ruta_instancia, nombre_instancia):
+    def instalacion_ftb_finalizada(self, exito, mensaje, ruta_instancia, nombre_instancia, modpack_detalles, id_modpack):
         self.btn_instalar.setEnabled(True)
         self.btn_buscar.setEnabled(True)
         self.barra_progreso.setValue(100 if exito else 0)
@@ -591,11 +746,17 @@ class FTBDownloaderDialog(QDialog):
             if not os.path.exists(os.path.join(ruta_instancia, "start.bat")):
                 archivo_arranque = "run.bat" if os.path.exists(os.path.join(ruta_instancia, "run.bat")) else "server.jar"
 
-            config_data = {"archivo_arranque": archivo_arranque, "java_especifico": "AUTO"}
+            config_data = {
+                "archivo_arranque": archivo_arranque, 
+                "java_especifico": "AUTO",
+                "ftb_nombre_real": modpack_detalles.get("name", ""),
+                "ftb_modpack_id": id_modpack
+            }
             with open(os.path.join(ruta_instancia, "config_instancia.json"), "w", encoding="utf-8") as f:
                 json.dump(config_data, f, indent=4)
 
-            QMessageBox.information(self, "FTB Server Listo", f"Instancia '{nombre_instancia}' creada exitosamente.")
+            tipo_msg = "actualizada" if self.ruta_update else "creada"
+            QMessageBox.information(self, "FTB Server Listo", f"Instancia '{nombre_instancia}' {tipo_msg} exitosamente.")
             self.accept()
         else:
             QMessageBox.critical(self, "Error de Instalación FTB", f"No se pudo completar la instalación:\n{mensaje}")

@@ -158,8 +158,14 @@ class FTBDownloadWorker(QThread):
             while True:
                 # Leemos de a 1 caracter para no bloquearnos en los prompts [Y/n] que no tienen \n
                 char = proceso.stdout.read(1)
-                if not char and proceso.poll() is not None:
-                    break
+                if not char:
+                    if proceso.poll() is not None:
+                        # Si hay algo en el buffer antes de cerrar, lo mostramos
+                        if buffer_linea.strip():
+                            linea_final = ansi_cleaner.sub('', buffer_linea).strip()
+                            if linea_final: self.estado.emit(f"FTB: {linea_final}")
+                        break
+                    continue
                 
                 buffer_linea += char
                 
@@ -205,7 +211,7 @@ class FTBDownloadWorker(QThread):
             if proceso.returncode == 0:
                 self.finalizado.emit(True, "Servidor de FTB instalado correctamente con todas sus dependencias.")
             else:
-                self.finalizado.emit(False, "El instalador finalizó con errores o fue cancelado.")
+                self.finalizado.emit(False, f"El instalador falló (Código: {proceso.returncode}). Revisa el log para ver el error de Java o Red.")
 
         except OSError as e:
             mensaje_error = str(e)

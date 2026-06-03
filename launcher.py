@@ -138,9 +138,22 @@ class ServerLauncher(QMainWindow):
                     break
         return archivo, java_esp
 
-    def guardar_datos_instancia(self, ruta_servidor, archivo, java_esp):
+    def guardar_datos_instancia(self, ruta_servidor, archivo, java_esp, **kwargs):
         ruta_json = os.path.join(ruta_servidor, "config_instancia.json")
-        data = {"archivo_arranque": archivo, "java_especifico": java_esp}
+        data = {}
+        # Cargamos datos existentes para no sobrescribir metadatos de FTB
+        if os.path.exists(ruta_json):
+            try:
+                with open(ruta_json, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+            except: pass
+        
+        data.update({
+            "archivo_arranque": archivo,
+            "java_especifico": java_esp
+        })
+        data.update(kwargs)
+
         with open(ruta_json, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=4)
 
@@ -172,13 +185,25 @@ class ServerLauncher(QMainWindow):
         # pero lo dejamos por seguridad.
         dialogo.instancia_eliminada.connect(self.cargar_instancias)
         
+        def manejar_actualizacion(nombre_modpack, mid, vid):
+            dialogo.done(QDialog.DialogCode.Rejected)
+            self.abrir_descargador_ftb(busqueda=nombre_modpack, ruta_update=ruta_servidor, modpack_id=mid, version_actual=vid)
+
+        dialogo.solicitar_actualizacion.connect(manejar_actualizacion)
+        
         if dialogo.exec() == QDialog.DialogCode.Accepted:
             # Usamos la ruta del diálogo por si se renombró la carpeta durante la configuración
-            self.guardar_datos_instancia(dialogo.ruta_instancia, dialogo.archivo_seleccionado, dialogo.combo_java.currentData())
+            self.guardar_datos_instancia(
+                dialogo.ruta_instancia, 
+                dialogo.archivo_seleccionado, 
+                dialogo.combo_java.currentData(),
+                ftb_nombre_real=dialogo.ftb_nombre_real,
+                ftb_modpack_id=dialogo.ftb_modpack_id
+            )
             # Forzamos una recarga para actualizar el texto en la cuadrícula inmediatamente
             self.cargar_instancias()
 
-    def abrir_descargador_ftb(self):
+    def abrir_descargador_ftb(self, busqueda=None, ruta_update=None, modpack_id=None, version_actual=None):
         # Verificación preventiva de permisos de Administrador en Windows
         if os.name == 'nt':
             try:
@@ -194,7 +219,10 @@ class ServerLauncher(QMainWindow):
                     "'Ejecutar como administrador' antes de intentar descargar."
                 )
 
-        dialogo = FTBDownloaderDialog(self.ruta_instancias, self.ruta_javas_raiz, self)
+        dialogo = FTBDownloaderDialog(self.ruta_instancias, self.ruta_javas_raiz, ruta_update, 
+                                      modpack_id=modpack_id, version_actual=version_actual, parent=self)
+        if busqueda and not isinstance(busqueda, bool):
+            dialogo.set_busqueda_inicial(busqueda)
         dialogo.exec() # El watcher actualizará la lista en cuanto se cree la carpeta de la instancia
 
     def cargar_instancias(self):
