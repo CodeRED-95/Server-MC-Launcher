@@ -196,6 +196,12 @@ class ServerLauncher(QMainWindow):
 
         dialogo.solicitar_actualizacion.connect(manejar_actualizacion)
         
+        def manejar_actualizacion_zip():
+            dialogo.done(QDialog.DialogCode.Rejected)
+            self.abrir_instalador_zip(ruta_update=ruta_servidor)
+
+        dialogo.solicitar_actualizacion_zip.connect(manejar_actualizacion_zip)
+
         if dialogo.exec() == QDialog.DialogCode.Accepted:
             # Usamos la ruta del diálogo por si se renombró la carpeta durante la configuración
             self.guardar_datos_instancia(
@@ -230,7 +236,7 @@ class ServerLauncher(QMainWindow):
             dialogo.set_busqueda_inicial(busqueda)
         dialogo.exec() # El watcher actualizará la lista en cuanto se cree la carpeta de la instancia
 
-    def abrir_instalador_zip(self):
+    def abrir_instalador_zip(self, ruta_update=None):
         # 1. Seleccionar archivo ZIP
         zip_file, _ = QFileDialog.getOpenFileName(
             self, "Seleccionar Archivo ZIP del Servidor", "", "Archivos ZIP (*.zip);;Todos los archivos (*.*)"
@@ -238,7 +244,7 @@ class ServerLauncher(QMainWindow):
         if not zip_file: return
 
         # 2. Abrir diálogo para nombre de instancia y descompresión
-        dialogo = ZipInstallerDialog(zip_file, self.ruta_instancias, self)
+        dialogo = ZipInstallerDialog(zip_file, self.ruta_instancias, ruta_update=ruta_update, parent=self)
         if dialogo.exec() == QDialog.DialogCode.Accepted:
             QMessageBox.information(
                 self, "Instalación Completada",
@@ -450,13 +456,20 @@ class ServerLauncher(QMainWindow):
 
             env = QProcessEnvironment.systemEnvironment()
             env.insert("PATH", os.path.dirname(java_exe_real) + os.path.pathsep + env.value("PATH"))
+            
+            # Inyectamos JAVA_HOME (es el padre de la carpeta bin)
+            java_home = os.path.dirname(os.path.dirname(java_exe_real))
+            env.insert("JAVA_HOME", java_home)
+            
             self.proceso_server.setProcessEnvironment(env)
             self.proceso_server.setWorkingDirectory(ruta_servidor)
 
             if ejecutable.endswith(".bat"):
                 comando = "cmd.exe"
-                # Añadimos nogui al final de la ejecución por lotes
-                argumentos = ["/c", ejecutable, "nogui"]
+                argumentos = ["/c", ejecutable]
+                # Solo añadimos nogui si no es el instalador inicial de un modpack (ZIP)
+                if ejecutable != "startserver.bat":
+                    argumentos.append("nogui")
             else:
                 comando = java_exe_real
                 # Forzamos nogui estrictamente como argumento independiente para el archivo .jar

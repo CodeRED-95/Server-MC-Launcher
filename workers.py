@@ -68,20 +68,23 @@ class ZipExtractionWorker(QThread):
     estado = pyqtSignal(str)
     finalizado = pyqtSignal(bool, str, str) # success, message, instance_path
 
-    def __init__(self, zip_path, instance_name, destination_root_path):
+    def __init__(self, zip_path, instance_name, destination_root_path, es_update=False):
         super().__init__()
         self.zip_path = zip_path
         self.instance_name = instance_name
         self.destination_root_path = destination_root_path
         self.instance_path = os.path.join(self.destination_root_path, self.instance_name)
+        self.es_update = es_update
 
     def run(self):
         try:
-            if os.path.exists(self.instance_path):
+            if not self.es_update and os.path.exists(self.instance_path):
                 self.finalizado.emit(False, f"La carpeta '{self.instance_name}' ya existe.", "")
                 return
 
-            os.makedirs(self.instance_path)
+            if not os.path.exists(self.instance_path):
+                os.makedirs(self.instance_path)
+
             self.estado.emit(f"Descomprimiendo '{os.path.basename(self.zip_path)}' en '{self.instance_name}'...")
             self.progreso.emit(0)
 
@@ -94,9 +97,20 @@ class ZipExtractionWorker(QThread):
                     porcentaje = int((i / total_files) * 90)
                     self.progreso.emit(porcentaje)
 
-            # Crear config_instancia.json
+            # Crear o actualizar config_instancia.json
+            ruta_json = os.path.join(self.instance_path, "config_instancia.json")
             config_data = {"archivo_arranque": "startserver.bat", "java_especifico": "AUTO"}
-            with open(os.path.join(self.instance_path, "config_instancia.json"), "w", encoding="utf-8") as f:
+
+            if self.es_update and os.path.exists(ruta_json):
+                try:
+                    with open(ruta_json, "r", encoding="utf-8") as f:
+                        data_existente = json.load(f)
+                        # Forzamos el regreso a startserver.bat preservando el resto (Java, IDs, etc)
+                        data_existente["archivo_arranque"] = "startserver.bat"
+                        config_data = data_existente
+                except Exception: pass
+
+            with open(ruta_json, "w", encoding="utf-8") as f:
                 json.dump(config_data, f, indent=4)
 
             self.progreso.emit(100)

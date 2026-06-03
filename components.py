@@ -262,6 +262,7 @@ class ConfigGlobalDialog(QDialog):
 class ConfigInstanciaDialog(QDialog):
     instancia_eliminada = pyqtSignal()
     solicitar_actualizacion = pyqtSignal(str, str, str) # nombre, modpack_id, version_id
+    solicitar_actualizacion_zip = pyqtSignal()
 
     def __init__(self, nombre_instancia, ruta_instancia, archivo_actual, java_actual, ruta_javas_raiz, parent=None):
         super().__init__(parent)
@@ -318,6 +319,12 @@ class ConfigInstanciaDialog(QDialog):
             QPushButton:disabled { background-color: #4b5563; }
         """)
 
+        self.btn_actualizar_zip = QPushButton("📦 Actualizar por ZIP")
+        self.btn_actualizar_zip.setStyleSheet("""
+            QPushButton { background-color: #7c3aed; color: white; font-weight: bold; padding: 6px 15px; border-radius: 4px; }
+            QPushButton:hover { background-color: #6d28d9; }
+        """)
+
         self.btn_eliminar = QPushButton("🗑️ Eliminar Instancia")
         self.btn_eliminar.setStyleSheet("""
             QPushButton { background-color: #a61c1c; color: white; font-weight: bold; padding: 6px 15px; border-radius: 4px; }
@@ -338,6 +345,7 @@ class ConfigInstanciaDialog(QDialog):
         layout_botones = QHBoxLayout()
         layout_botones.addWidget(self.btn_eliminar)
         layout_botones.addWidget(self.btn_actualizar)
+        layout_botones.addWidget(self.btn_actualizar_zip)
         layout_botones.addStretch()
         layout_botones.addWidget(self.btn_guardar)
         layout_botones.addWidget(self.btn_cancelar)
@@ -362,6 +370,7 @@ class ConfigInstanciaDialog(QDialog):
         self.btn_buscar_icon.clicked.connect(self.seleccionar_icono)
         self.btn_eliminar.clicked.connect(self.eliminar_instancia_con_confirmacion)
         self.btn_actualizar.clicked.connect(self.preparar_actualizacion)
+        self.btn_actualizar_zip.clicked.connect(self.solicitar_actualizacion_zip.emit)
         self.btn_guardar.clicked.connect(self.accept)
         self.btn_cancelar.clicked.connect(self.reject)
 
@@ -762,26 +771,34 @@ class FTBDownloaderDialog(QDialog):
             QMessageBox.critical(self, "Error de Instalación FTB", f"No se pudo completar la instalación:\n{mensaje}")
 
 class ZipInstallerDialog(QDialog):
-    def __init__(self, zip_path, destination_root_path, parent=None):
+    def __init__(self, zip_path, destination_root_path, ruta_update=None, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("📦 Instalar Servidor desde Archivo ZIP")
+        self.setWindowTitle("📦 Instalar/Actualizar Servidor desde ZIP")
         self.resize(450, 250)
         self.zip_path = zip_path
         self.destination_root_path = destination_root_path
+        self.ruta_update = ruta_update
         self.instance_name = ""
         self.worker = None
 
         self.lbl_zip_file = QLabel(f"Archivo ZIP seleccionado: <b>{os.path.basename(zip_path)}</b>")
         self.lbl_instance_name = QLabel("Nombre para la nueva instancia (carpeta):")
         self.txt_instance_name = QLineEdit()
-        self.txt_instance_name.setPlaceholderText("Ej: MiServidorPersonalizado")
+        
+        if self.ruta_update:
+            self.instance_name = os.path.basename(self.ruta_update)
+            self.txt_instance_name.setText(self.instance_name)
+            self.txt_instance_name.setEnabled(False)
+            self.lbl_estado = QLabel("Estado: Listo para actualizar archivos.")
+        else:
+            self.txt_instance_name.setPlaceholderText("Ej: MiServidorPersonalizado")
+            self.lbl_estado = QLabel("Estado: Esperando nombre de instancia...")
         
         self.btn_instalar = QPushButton("Instalar")
         self.btn_cancelar = QPushButton("Cancelar")
         
         self.barra_progreso = QProgressBar()
         self.barra_progreso.setValue(0)
-        self.lbl_estado = QLabel("Estado: Esperando nombre de instancia...")
 
         layout_botones = QHBoxLayout()
         layout_botones.addStretch()
@@ -814,10 +831,20 @@ class ZipInstallerDialog(QDialog):
             QMessageBox.warning(self, "Nombre inválido", f"El nombre contiene caracteres no permitidos: {invalid_chars}")
             return
 
+        if self.ruta_update:
+            confirm = QMessageBox.warning(
+                self, "Confirmar Actualización",
+                "Se extraerán los archivos del ZIP sobre la carpeta actual.\n\n"
+                "⚠️ IMPORTANTE: Haz un backup de tu mundo antes de continuar.\n"
+                "¿Deseas proceder?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+            )
+            if confirm == QMessageBox.StandardButton.No: return
+
         self.btn_instalar.setEnabled(False)
         self.txt_instance_name.setReadOnly(True)
         
-        self.worker = ZipExtractionWorker(self.zip_path, self.instance_name, self.destination_root_path)
+        self.worker = ZipExtractionWorker(self.zip_path, self.instance_name, self.destination_root_path, es_update=bool(self.ruta_update))
         self.worker.progreso.connect(self.barra_progreso.setValue)
         self.worker.estado.connect(self.lbl_estado.setText)
         self.worker.finalizado.connect(self.instalacion_zip_finalizada)
