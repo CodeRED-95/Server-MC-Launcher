@@ -9,13 +9,13 @@ from PyQt6.QtWidgets import (QMainWindow, QPushButton, QVBoxLayout, QHBoxLayout,
 from PyQt6.QtCore import QProcess, QProcessEnvironment, Qt, QSize
 from PyQt6.QtGui import QIcon
 
-from components import ConsoleWindow, ConfigGlobalDialog, ConfigInstanciaDialog
+from components import ConsoleWindow, ConfigGlobalDialog, ConfigInstanciaDialog, FTBDownloaderDialog
 
 class ServerLauncher(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Minecraft Server Launcher Grid Pro")
-        self.resize(900, 600)
+        self.resize(1000, 600)
 
         self.ARCHIVO_CONFIG_GLOBAL = os.path.join(os.path.dirname(__file__), "config.json")
         self.ruta_instancias = ""
@@ -47,17 +47,20 @@ class ServerLauncher(QMainWindow):
         
         self.btn_iniciar = QPushButton("🚀 Iniciar Servidor")
         self.btn_config_instancia = QPushButton("🛠️ Configurar Instancia")
-        self.btn_config_global = QPushButton("⚙️ Configuración General / Javas")
+        self.btn_config_global = QPushButton("⚙️ Ajustes / Java")
+        self.btn_descargar_ftb = QPushButton("🔥 Descargar FTB")
         
         estilo_botones = "QPushButton { padding: 8px; font-size: 10pt; font-weight: bold; }"
         self.btn_iniciar.setStyleSheet(estilo_botones)
         self.btn_config_instancia.setStyleSheet(estilo_botones)
         self.btn_config_global.setStyleSheet(estilo_botones)
+        self.btn_descargar_ftb.setStyleSheet(estilo_botones)
 
         layout_botones = QHBoxLayout()
         layout_botones.addWidget(self.btn_iniciar, stretch=2)
         layout_botones.addWidget(self.btn_config_instancia, stretch=1)
         layout_botones.addWidget(self.btn_config_global, stretch=1)
+        layout_botones.addWidget(self.btn_descargar_ftb, stretch=1)
 
         layout_principal = QVBoxLayout()
         layout_principal.addWidget(self.lbl_instancias)
@@ -77,6 +80,7 @@ class ServerLauncher(QMainWindow):
         self.btn_iniciar.clicked.connect(self.controlar_servidor)
         self.btn_config_global.clicked.connect(self.abrir_configuracion_global)
         self.btn_config_instancia.clicked.connect(self.abrir_configuracion_instancia)
+        self.btn_descargar_ftb.clicked.connect(self.abrir_descargador_ftb)
         self.lista_servidores.currentItemChanged.connect(self.actualizar_estado_botones)
         
         self.proceso_server.readyRead.connect(self.leer_consola)
@@ -121,7 +125,7 @@ class ServerLauncher(QMainWindow):
             except Exception: pass
         
         if not archivo:
-            for opcion in ["run.bat", "start.bat", "server.jar"]:
+            for opcion in ["start.bat", "run.bat", "server.jar"]:
                 if os.path.exists(os.path.join(ruta_servidor, opcion)):
                     archivo = opcion
                     break
@@ -154,6 +158,11 @@ class ServerLauncher(QMainWindow):
             self.guardar_datos_instancia(ruta_servidor, dialogo.archivo_seleccionado, dialogo.combo_java.currentData())
             self.cargar_instancias()
 
+    def abrir_descargador_ftb(self):
+        dialogo = FTBDownloaderDialog(self.ruta_instancias, self)
+        if dialogo.exec() == QDialog.DialogCode.Accepted:
+            self.cargar_instancias()
+
     def cargar_instancias(self):
         self.lista_servidores.clear()
         if os.path.exists(self.ruta_instancias):
@@ -177,6 +186,7 @@ class ServerLauncher(QMainWindow):
         en_ejecucion = self.proceso_server.state() == QProcess.ProcessState.Running
         self.btn_config_instancia.setEnabled(tiene_seleccion and not en_ejecucion)
         self.btn_config_global.setEnabled(not en_ejecucion)
+        self.btn_descargar_ftb.setEnabled(not en_ejecucion)
         self.lista_servidores.setEnabled(not en_ejecucion)
 
     def detectar_version_java_de_jar(self, ruta_jar):
@@ -263,7 +273,7 @@ class ServerLauncher(QMainWindow):
                     self, "Falta Entorno Java", 
                     f"La instancia '{nombre_carpeta}' requiere **Java {version_necesitada}** para iniciar, "
                     f"pero tu carpeta de entornos portables está vacía.\n\n"
-                    f"Solución: Ve a 'Configuración General / Javas' y descarga e instala **Java {version_necesitada}**."
+                    f"Solución: Ve a 'Ajustes / Java' y descarga e instala **Java {version_necesitada}**."
                 )
                 return
                 
@@ -275,7 +285,7 @@ class ServerLauncher(QMainWindow):
                     f"➔ Esta instancia requiere estrictamente **Java {version_necesitada}**.\n\n"
                     f"Estado actual: Tienes otras versiones descargadas, pero ninguna coincide con la versión {version_necesitada}.\n\n"
                     f"Solución:\n"
-                    f"1. Abre 'Configuración General' y descarga **Java {version_necesitada}**.\n"
+                    f"1. Abre 'Ajustes / Java' y descarga **Java {version_necesitada}**.\n"
                     f"2. O de lo contrario, ve a 'Configurar Instancia' y fuerza un Java fijo de los que posees."
                 )
                 return
@@ -302,9 +312,11 @@ class ServerLauncher(QMainWindow):
 
             if ejecutable.endswith(".bat"):
                 comando = "cmd.exe"
+                # Añadimos nogui al final de la ejecución por lotes
                 argumentos = ["/c", ejecutable, "nogui"]
             else:
                 comando = java_exe_real
+                # Forzamos nogui estrictamente como argumento independiente para el archivo .jar
                 argumentos = ["-Xmx2G", "-Xms1G", "-jar", ejecutable, "nogui"]
 
             self.actualizar_estado_botones()

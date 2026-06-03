@@ -1,6 +1,7 @@
 # workers.py
 import os
 import zipfile
+import subprocess
 from PyQt6.QtCore import QThread, pyqtSignal
 
 class DownloaderWorker(QThread):
@@ -56,5 +57,66 @@ class DownloaderWorker(QThread):
                 os.remove(self.destino_zip)
 
             self.finalizado.emit(True, "Java instalado y configurado correctamente.")
+        except Exception as e:
+            self.finalizado.emit(False, str(e))
+
+
+class FTBDownloadWorker(QThread):
+    """Hilo para descargar y ejecutar el instalador oficial de servidores de FTB."""
+    progreso = pyqtSignal(int)
+    estado = pyqtSignal(str)
+    finalizado = pyqtSignal(bool, str)
+
+    def __init__(self, url_instalador, ruta_destino_instancia, id_modpack, id_version):
+        super().__init__()
+        self.url_instalador = url_instalador
+        self.ruta_destino_instancia = ruta_destino_instancia
+        self.id_modpack = id_modpack
+        self.id_version = id_version
+
+    def run(self):
+        try:
+            import urllib.request
+            if not os.path.exists(self.ruta_destino_instancia):
+                os.makedirs(self.ruta_destino_instancia)
+
+            self.estado.emit("Descargando instalador oficial de FTB...")
+            self.progreso.emit(10)
+            
+            ruta_instalador_exe = os.path.join(self.ruta_destino_instancia, "ftb_installer.exe")
+            
+            req = urllib.request.Request(self.url_instalador, headers={'User-Agent': 'Mozilla/5.0'})
+            with urllib.request.urlopen(req) as response, open(ruta_instalador_exe, 'wb') as out_file:
+                out_file.write(response.read())
+            
+            self.progreso.emit(40)
+            self.estado.emit("Instalando archivos del servidor FTB (Esto puede tardar varios minutos)...")
+
+            comando = [
+                ruta_instalador_exe,
+                str(self.id_modpack),
+                str(self.id_version),
+                "--path", self.ruta_destino_instancia,
+                "--silent"
+            ]
+            
+            proceso = subprocess.run(
+                comando, 
+                stdout=subprocess.PIPE, 
+                stderr=subprocess.PIPE, 
+                text=True, 
+                creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
+            )
+            
+            self.progreso.emit(90)
+            
+            if os.path.exists(ruta_instalador_exe):
+                os.remove(ruta_instalador_exe)
+
+            if proceso.returncode == 0:
+                self.finalizado.emit(True, "Servidor de FTB descargado e instalado correctamente.")
+            else:
+                self.finalizado.emit(False, f"El instalador de FTB falló: {proceso.stderr}")
+
         except Exception as e:
             self.finalizado.emit(False, str(e))
