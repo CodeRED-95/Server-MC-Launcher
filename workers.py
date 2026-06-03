@@ -1,6 +1,7 @@
 # workers.py
 import os
 import zipfile
+import re
 import time
 import urllib.request
 import subprocess
@@ -74,6 +75,7 @@ class FTBDownloadWorker(QThread):
         self.ruta_javas_raiz = ruta_javas_raiz
         self.id_modpack = str(id_modpack) if id_modpack else ""
         self.id_version = str(id_version) if id_version else ""
+        self.proceso = None
 
     def run(self):
         try:
@@ -116,6 +118,11 @@ class FTBDownloadWorker(QThread):
                 java_home = os.path.dirname(java_bin_aux)
                 env_instalacion["JAVA_HOME"] = java_home
                 env_instalacion["PATH"] = java_bin_aux + os.pathsep + env_instalacion.get("PATH", "")
+            
+            # Forzamos al instalador a modo no interactivo para evitar deadlocks en entornos sin TTY
+            env_instalacion["CI"] = "true"
+            env_instalacion["PTERM_NO_INTERACTIVE"] = "true"
+            env_instalacion["PTERM_NO_COLOR"] = "true"
 
             # SEGÚN EL REPO DE FTB: 
             # Uso: ftb-server-installer <modpack_id> [version_id] --path [ruta] --auto
@@ -123,12 +130,12 @@ class FTBDownloadWorker(QThread):
             # --path: Especifica dónde instalar.
             
             # Evitamos pasar argumentos vacíos si no hay IDs definidos
-            argumentos = [ruta_instalador_exe]
+            argumentos = [ruta_instalador_exe, "--auto"]
             if self.id_modpack:
                 argumentos.append(self.id_modpack)
                 if self.id_version:
                     argumentos.append(self.id_version)
-            argumentos.extend(["--path", self.ruta_destino_instancia, "--auto"])
+            argumentos.extend(["--path", self.ruta_destino_instancia])
 
             proceso = subprocess.Popen(
                 argumentos,
@@ -142,28 +149,46 @@ class FTBDownloadWorker(QThread):
                 creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0,
                 encoding='utf-8', errors='replace'
             )
+            self.proceso = proceso
 
-            # Ahora solo leemos la salida para informar al usuario del progreso, 
-            # ya no necesitamos escribir en stdin gracias a --auto
+            ansi_cleaner = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
+            buffer_linea = ""
+            lower_linea = ""
+
             while True:
-                linea = proceso.stdout.readline()
-                if not linea:
+                # Leemos de a 1 caracter para no bloquearnos en los prompts [Y/n] que no tienen \n
+                char = proceso.stdout.read(1)
+                if not char and proceso.poll() is not None:
                     break
                 
-                linea_limpia = linea.strip()
-                lower_linea = linea_limpia.lower()
+                buffer_linea += char
                 
-                # Emitir siempre la línea para que el usuario vea progreso real
-                if linea_limpia:
-                    # Filtramos líneas que son solo progreso visual (muchos puntos o barras)
-                    if not all(c in '.#= █' for c in linea_limpia):
-                        # Mostramos el mensaje del instalador directamente en la UI
-                        self.estado.emit(f"FTB: {linea_limpia}")
+                # Procesamos si hay salto de línea o si el buffer parece un prompt (termina en : o ?)
+                if char in ('\n', '\r') or buffer_linea.endswith(':') or buffer_linea.endswith('?'):
+                    linea_sin_ansi = ansi_cleaner.sub('', buffer_linea).strip()
+                    lower_linea = linea_sin_ansi.lower()
 
-                # Actualizaciones lógicas de la barra de progreso
-                if "modpack files downloaded" in lower_linea:
-                    self.progreso.emit(90)
-                    self.estado.emit("¡Archivos base listos! Finalizando...")
+                    if linea_sin_ansi and not all(c in '.#= █' for c in linea_sin_ansi):
+                        self.estado.emit(f"FTB: {linea_sin_ansi}")
+
+                    # INTERACCIÓN AUTOMÁTICA: Detectamos preguntas del instalador
+                    palabras_interaccion = [
+                        "agree to the eula", "install java", "continue?", 
+                        "confirm installation", "install path", "[y/n]"
+                    ]
+                    
+                    if any(p in lower_linea for p in palabras_interaccion):
+                        # Pequeña pausa para asegurar que el instalador esté listo para recibir el comando
+                        time.sleep(0.2)
+                        self.enviar_entrada("y")
+
+                    # Actualizaciones de progreso
+                    if "modpack files downloaded" in lower_linea:
+                        self.progreso.emit(90)
+                        self.estado.emit("¡Archivos base listos! Finalizando...")
+
+                    # Limpiamos el buffer para la siguiente parte del texto
+                    buffer_linea = ""
 
             # Esperamos que finalice de escribir todos los archivos en disco
             proceso.wait()
@@ -189,3 +214,11 @@ class FTBDownloadWorker(QThread):
             self.finalizado.emit(False, mensaje_error)
         except Exception as e:
             self.finalizado.emit(False, str(e))
+
+    def enviar_entrada(self, texto):
+        """Permite enviar comandos manuales al stdin del instalador."""
+        if self.proceso and self.proceso.poll() is None:
+            try:
+                self.proceso.stdin.write(texto + "\n")
+                self.proceso.stdin.flush()
+            except Exception: pass

@@ -317,14 +317,30 @@ class FTBDownloaderDialog(QDialog):
         self.lista_resultados = QListWidget()
         self.lbl_version = QLabel("Seleccionar Versión del Servidor:")
         self.combo_versiones = QComboBox()
+        
+        self.log_instalacion = QPlainTextEdit()
+        self.log_instalacion.setReadOnly(True)
+        self.log_instalacion.setMaximumHeight(120)
+        self.log_instalacion.setStyleSheet("background-color: #1a1a1a; color: #00ff00; font-family: Consolas; font-size: 9pt;")
+        # Auto-scroll al final
+        self.log_instalacion.textChanged.connect(lambda: self.log_instalacion.ensureCursorVisible())
+
+        self.input_interaccion = QLineEdit()
+        self.input_interaccion.setPlaceholderText("Escribe 'y' y pulsa Enter si el instalador se detiene...")
+        self.btn_enviar_interaccion = QPushButton("Enviar comando")
+
         self.btn_instalar = QPushButton("⚡ Crear Instancia y Descargar Servidor")
         self.btn_instalar.setEnabled(False)
         self.barra_progreso = QProgressBar()
-        self.lbl_estado = QLabel("Estado: Cargando catálogo...")
+        self.lbl_estado = QLabel("Estado: Listo.")
 
         layout_busqueda = QHBoxLayout()
         layout_busqueda.addWidget(self.txt_buscar)
         layout_busqueda.addWidget(self.btn_buscar)
+
+        layout_interactivo = QHBoxLayout()
+        layout_interactivo.addWidget(self.input_interaccion)
+        layout_interactivo.addWidget(self.btn_enviar_interaccion)
 
         layout_principal = QVBoxLayout()
         layout_principal.addWidget(self.lbl_buscar)
@@ -332,6 +348,8 @@ class FTBDownloaderDialog(QDialog):
         layout_principal.addWidget(self.lista_resultados)
         layout_principal.addWidget(self.lbl_version)
         layout_principal.addWidget(self.combo_versiones)
+        layout_principal.addWidget(self.log_instalacion)
+        layout_principal.addLayout(layout_interactivo)
         layout_principal.addWidget(self.lbl_estado)
         layout_principal.addWidget(self.barra_progreso)
         layout_principal.addWidget(self.btn_instalar)
@@ -340,6 +358,8 @@ class FTBDownloaderDialog(QDialog):
         self.btn_buscar.clicked.connect(self.buscar_modpack_api)
         self.lista_resultados.itemSelectionChanged.connect(self.cargar_versiones_modpack)
         self.btn_instalar.clicked.connect(self.iniciar_descarga_ftb)
+        self.btn_enviar_interaccion.clicked.connect(self.enviar_comando_manual)
+        self.input_interaccion.returnPressed.connect(self.enviar_comando_manual)
         self.cargar_catalogo_predeterminado()
 
     def cargar_catalogo_predeterminado(self):
@@ -421,12 +441,22 @@ class FTBDownloaderDialog(QDialog):
 
         self.btn_instalar.setEnabled(False)
         self.btn_buscar.setEnabled(False)
+        self.log_instalacion.clear()
+        self.log_instalacion.appendPlainText("--- Iniciando Instalación ---")
 
         self.worker = FTBDownloadWorker(url_descarga_exe, ruta_instancia_destino, self.ruta_javas_raiz, id_modpack, id_version)
         self.worker.progreso.connect(self.barra_progreso.setValue)
         self.worker.estado.connect(self.lbl_estado.setText)
+        self.worker.estado.connect(self.log_instalacion.appendPlainText)
         self.worker.finalizado.connect(lambda exito, msg: self.instalacion_ftb_finalizada(exito, msg, ruta_instancia_destino, nombre_carpeta_final))
         self.worker.start()
+
+    def enviar_comando_manual(self):
+        comando = self.input_interaccion.text().strip()
+        if comando and self.worker:
+            self.worker.enviar_entrada(comando)
+            self.input_interaccion.clear()
+            self.log_instalacion.appendPlainText(f"> Enviado al instalador: {comando}")
 
     def instalacion_ftb_finalizada(self, exito, mensaje, ruta_instancia, nombre_instancia):
         self.btn_instalar.setEnabled(True)

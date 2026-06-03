@@ -3,10 +3,11 @@ import os
 import json
 import struct
 import zipfile
+import ctypes
 from PyQt6.QtWidgets import (QMainWindow, QPushButton, QVBoxLayout, QHBoxLayout, 
                              QWidget, QListWidget, QListWidgetItem, QLabel, 
                              QDialog, QMessageBox)
-from PyQt6.QtCore import QProcess, QProcessEnvironment, Qt, QSize
+from PyQt6.QtCore import QProcess, QProcessEnvironment, Qt, QSize, QFileSystemWatcher
 from PyQt6.QtGui import QIcon
 
 from components import ConsoleWindow, ConfigGlobalDialog, ConfigInstanciaDialog, FTBDownloaderDialog
@@ -86,6 +87,12 @@ class ServerLauncher(QMainWindow):
         self.proceso_server.readyRead.connect(self.leer_consola)
         self.proceso_server.finished.connect(self.servidor_terminado)
 
+        # Sistema de actualización automática: Observador de la carpeta de instancias
+        self.watcher = QFileSystemWatcher()
+        if os.path.exists(self.ruta_instancias):
+            self.watcher.addPath(self.ruta_instancias)
+        self.watcher.directoryChanged.connect(self.cargar_instancias)
+
         self.cargar_instancias()
 
     def cargar_configuracion_global(self):
@@ -140,6 +147,13 @@ class ServerLauncher(QMainWindow):
     def abrir_configuracion_global(self):
         dialogo = ConfigGlobalDialog(self.ruta_instancias, self.ruta_javas_raiz, self)
         if dialogo.exec() == QDialog.DialogCode.Accepted:
+            # Actualizamos el observador si la ruta cambió
+            if self.ruta_instancias != dialogo.ruta_instancias:
+                if self.ruta_instancias in self.watcher.directories():
+                    self.watcher.removePath(self.ruta_instancias)
+                if os.path.exists(dialogo.ruta_instancias):
+                    self.watcher.addPath(dialogo.ruta_instancias)
+
             self.ruta_instancias = dialogo.ruta_instancias
             self.ruta_javas_raiz = dialogo.ruta_javas_raiz
             self.guardar_configuracion_global()
@@ -154,14 +168,32 @@ class ServerLauncher(QMainWindow):
         archivo_actual, java_actual = self.obtener_datos_instancia(ruta_servidor)
 
         dialogo = ConfigInstanciaDialog(nombre_carpeta, ruta_servidor, archivo_actual, java_actual, self.ruta_javas_raiz, self)
+        # Ya no es estrictamente necesario conectar instancia_eliminada porque el Watcher lo detectará,
+        # pero lo dejamos por seguridad.
+        dialogo.instancia_eliminada.connect(self.cargar_instancias)
+        
         if dialogo.exec() == QDialog.DialogCode.Accepted:
             self.guardar_datos_instancia(ruta_servidor, dialogo.archivo_seleccionado, dialogo.combo_java.currentData())
-            self.cargar_instancias()
+            # El watcher se encarga de llamar a cargar_instancias si hay cambios en disco
 
     def abrir_descargador_ftb(self):
+        # Verificación preventiva de permisos de Administrador en Windows
+        if os.name == 'nt':
+            try:
+                is_admin = ctypes.windll.shell32.IsUserAnAdmin() != 0
+            except:
+                is_admin = False
+                
+            if not is_admin:
+                QMessageBox.warning(
+                    self, "Atención: Sin permisos", 
+                    "El instalador de FTB requiere permisos de Administrador para funcionar.\n\n"
+                    "IMPORTANTE: Haz click derecho en el acceso directo del programa y selecciona "
+                    "'Ejecutar como administrador' antes de intentar descargar."
+                )
+
         dialogo = FTBDownloaderDialog(self.ruta_instancias, self.ruta_javas_raiz, self)
-        if dialogo.exec() == QDialog.DialogCode.Accepted:
-            self.cargar_instancias()
+        dialogo.exec() # El watcher actualizará la lista en cuanto se cree la carpeta de la instancia
 
     def cargar_instancias(self):
         self.lista_servidores.clear()
@@ -225,6 +257,40 @@ class ServerLauncher(QMainWindow):
             if f'"{v}.' in output or f' {v}.' in output: return v
         return None
 
+    def verificar_y_aceptar_eula(self, ruta_servidor):
+        """Busca el archivo eula.txt y solicita aceptación si detecta eula=false."""
+        ruta_eula = os.path.join(ruta_servidor, "eula.txt")
+        if not os.path.exists(ruta_eula):
+            # Si no existe, permitimos el arranque para que el server lo genere
+            return True
+            
+        try:
+            with open(ruta_eula, "r", encoding="utf-8") as f:
+                lineas = f.readlines()
+            
+            if any("eula=false" in linea.lower() for linea in lineas):
+                respuesta = QMessageBox.question(
+                    self, "Aceptar EULA de Minecraft",
+                    "Para ejecutar el servidor, debes aceptar los términos de la EULA de Mojang.\n\n"
+                    "¿Deseas aceptar el Contrato de Licencia (eula.txt) ahora?",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+                )
+                
+                if respuesta == QMessageBox.StandardButton.Yes:
+                    with open(ruta_eula, "w", encoding="utf-8") as f:
+                        for linea in lineas:
+                            if "eula=false" in linea.lower():
+                                f.write("eula=true\n")
+                            else:
+                                f.write(linea)
+                    return True
+                else:
+                    return False # El usuario rechazó, no iniciamos el server
+        except Exception as e:
+            print(f"Error al procesar EULA: {e}")
+            
+        return True
+
     def seleccionar_mejor_java(self, ruta_servidor):
         version_requerida = 17
         jar_principal = os.path.join(ruta_servidor, "server.jar")
@@ -256,6 +322,11 @@ class ServerLauncher(QMainWindow):
 
             nombre_carpeta = item_seleccionado.text()
             ruta_servidor = os.path.join(self.ruta_instancias, nombre_carpeta)
+            
+            # Verificación proactiva del EULA antes de lanzar el proceso
+            if not self.verificar_y_aceptar_eula(ruta_servidor):
+                return
+
             ejecutable, java_especifico = self.obtener_datos_instancia(ruta_servidor)
             
             if java_especifico == "AUTO" or not java_especifico:
