@@ -173,8 +173,10 @@ class ServerLauncher(QMainWindow):
         dialogo.instancia_eliminada.connect(self.cargar_instancias)
         
         if dialogo.exec() == QDialog.DialogCode.Accepted:
-            self.guardar_datos_instancia(ruta_servidor, dialogo.archivo_seleccionado, dialogo.combo_java.currentData())
-            # El watcher se encarga de llamar a cargar_instancias si hay cambios en disco
+            # Usamos la ruta del diálogo por si se renombró la carpeta durante la configuración
+            self.guardar_datos_instancia(dialogo.ruta_instancia, dialogo.archivo_seleccionado, dialogo.combo_java.currentData())
+            # Forzamos una recarga para actualizar el texto en la cuadrícula inmediatamente
+            self.cargar_instancias()
 
     def abrir_descargador_ftb(self):
         # Verificación preventiva de permisos de Administrador en Windows
@@ -410,13 +412,35 @@ class ServerLauncher(QMainWindow):
         except UnicodeDecodeError: texto = data.decode("cp1252", errors="replace")
         
         if self.ventana_consola:
-            if "Presione una tecla para continuar" in texto: self.proceso_server.write(b"\n")
-            else: self.ventana_consola.consola.appendPlainText(texto.rstrip())
+            # Detección multilingüe de la pausa de Windows (.bat)
+            prompts_pausa = [
+                "Presione una tecla para continuar",
+                "Press any key to continue",
+                "Appuyez sur une touche pour continuer"
+            ]
+            
+            if any(p in texto for p in prompts_pausa):
+                self.proceso_server.write(b"\n")
+            else:
+                # Filtramos líneas que son ecos del comando pause para limpiar el log final
+                if not texto.strip().endswith(">pause"):
+                    self.ventana_consola.consola.appendPlainText(texto.rstrip())
 
     def servidor_terminado(self):
         if self.ventana_consola:
-            self.ventana_consola.close()
-            self.ventana_consola = None
+            # Obtenemos el código de salida para informar al usuario
+            exit_code = self.proceso_server.exitCode()
+            mensaje = "\n[Launcher] El servidor se ha detenido correctamente." if exit_code == 0 else f"\n[Launcher] EL SERVIDOR SE CERRÓ CON ERRORES (Código: {exit_code})"
+            self.ventana_consola.consola.appendPlainText(mensaje)
+            
+            # Cambiamos el botón de detener para que ahora sirva para cerrar la ventana manualmente
+            self.ventana_consola.btn_stop_consola.setText("❌ Cerrar Ventana de Terminal")
+            self.ventana_consola.btn_stop_consola.setStyleSheet("background-color: #4a4a4a; color: white; padding: 6px;")
+            try:
+                self.ventana_consola.btn_stop_consola.clicked.disconnect()
+                self.ventana_consola.btn_stop_consola.clicked.connect(self.ventana_consola.close)
+            except: pass
+
         self.btn_iniciar.setText("🚀 Iniciar Servidor")
         self.instancia_actual = None
         self.actualizar_estado_botones()

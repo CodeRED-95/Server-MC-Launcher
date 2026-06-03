@@ -8,8 +8,36 @@ import urllib.error
 from PyQt6.QtWidgets import (QDialog, QPlainTextEdit, QLineEdit, QPushButton, 
                              QHBoxLayout, QVBoxLayout, QLabel, QComboBox, 
                              QProgressBar, QMessageBox, QFileDialog, QListWidget, QListWidgetItem)
-from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtCore import Qt, pyqtSignal, QRegularExpression
+from PyQt6.QtGui import QSyntaxHighlighter, QTextCharFormat, QColor
 from workers import DownloaderWorker, FTBDownloadWorker
+
+class LogHighlighter(QSyntaxHighlighter):
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.formatos = {
+            "INFO": self._crear_formato("#7dd3fc"),    # Azul claro
+            "WARN": self._crear_formato("#fbbf24"),    # Ámbar
+            "ERROR": self._crear_formato("#f87171"),   # Rojo suave
+            "FATAL": self._crear_formato("#ef4444", bold=True), # Rojo fuerte
+            "LAUNCHER": self._crear_formato("#a78bfa"), # Violeta
+            "DONE": self._crear_formato("#4ade80", bold=True)   # Verde brillante
+        }
+
+    def _crear_formato(self, color, bold=False):
+        fmt = QTextCharFormat()
+        fmt.setForeground(QColor(color))
+        if bold: fmt.setFontWeight(700)
+        return fmt
+
+    def highlightBlock(self, text):
+        text_up = text.upper()
+        if "[LAUNCHER]" in text_up: self.setFormat(0, len(text), self.formatos["LAUNCHER"])
+        elif "DONE (" in text_up or "FOR HELP, TYPE \"HELP\"" in text_up: self.setFormat(0, len(text), self.formatos["DONE"])
+        elif "ERROR" in text_up: self.setFormat(0, len(text), self.formatos["ERROR"])
+        elif "WARN" in text_up: self.setFormat(0, len(text), self.formatos["WARN"])
+        elif "FATAL" in text_up: self.setFormat(0, len(text), self.formatos["FATAL"])
+        elif "INFO" in text_up: self.setFormat(0, len(text), self.formatos["INFO"])
 
 class ConsoleWindow(QDialog):
     solicitar_stop = pyqtSignal()
@@ -30,6 +58,9 @@ class ConsoleWindow(QDialog):
                 font-size: 11pt;
             }
         """)
+        # Aseguramos que la consola siempre muestre lo último que llega (autoscroll)
+        self.consola.textChanged.connect(lambda: self.consola.ensureCursorVisible())
+        self.highlighter = LogHighlighter(self.consola.document())
         
         self.input_comando = QLineEdit()
         self.input_comando.setPlaceholderText("Escribe un comando aquí y presiona Enter...")
@@ -38,6 +69,10 @@ class ConsoleWindow(QDialog):
         """)
 
         self.btn_stop_consola = QPushButton("🛑 Detener Servidor")
+        # IMPORTANTE: Evitamos que el botón sea el 'default' y se active con Enter
+        self.btn_stop_consola.setAutoDefault(False)
+        self.btn_stop_consola.setDefault(False)
+        
         self.btn_stop_consola.setStyleSheet("""
             QPushButton { background-color: #a61c1c; color: white; font-weight: bold; padding: 6px 12px; border-radius: 4px; }
             QPushButton:hover { background-color: #cc2424; }
@@ -183,7 +218,11 @@ class ConfigInstanciaDialog(QDialog):
         self.ruta_javas_raiz = ruta_javas_raiz
 
         self.setWindowTitle(f"Configurar Instancia: {nombre_instancia}")
-        self.resize(600, 310)
+        self.resize(600, 360)
+
+        self.lbl_nombre = QLabel("Nombre de la instancia (Carpeta):")
+        self.txt_nombre = QLineEdit(self.nombre_instancia)
+        self.txt_nombre.setPlaceholderText("Nombre de la carpeta en disco")
 
         self.lbl_info = QLabel("Archivo ejecutable/arranque de la instancia (ej: run.bat):")
         self.txt_archivo = QLineEdit(self.archivo_seleccionado)
@@ -226,6 +265,9 @@ class ConfigInstanciaDialog(QDialog):
         layout_botones.addWidget(self.btn_cancelar)
 
         layout_principal = QVBoxLayout()
+        layout_principal.addWidget(self.lbl_nombre)
+        layout_principal.addWidget(self.txt_nombre)
+        layout_principal.addSpacing(10)
         layout_principal.addWidget(self.lbl_info)
         layout_principal.addLayout(layout_archivo)
         layout_principal.addSpacing(10)
@@ -298,6 +340,36 @@ class ConfigInstanciaDialog(QDialog):
             except Exception: pass
         index = self.combo_java.findData(self.java_seleccionado)
         if index != -1: self.combo_java.setCurrentIndex(index)
+
+    def accept(self):
+        nuevo_nombre = self.txt_nombre.text().strip()
+        if not nuevo_nombre:
+            QMessageBox.warning(self, "Nombre inválido", "El nombre de la instancia no puede estar vacío.")
+            return
+            
+        # Validación básica de caracteres prohibidos en carpetas
+        caracteres_invalidos = '<>:"/\\|?*'
+        if any(c in nuevo_nombre for c in caracteres_invalidos):
+            QMessageBox.warning(self, "Nombre inválido", f"El nombre contiene caracteres no permitidos: {caracteres_invalidos}")
+            return
+
+        if nuevo_nombre != self.nombre_instancia:
+            ruta_padre = os.path.dirname(self.ruta_instancia)
+            nueva_ruta = os.path.join(ruta_padre, nuevo_nombre)
+            
+            if os.path.exists(nueva_ruta):
+                QMessageBox.warning(self, "Error", "Ya existe una carpeta con ese nombre.")
+                return
+                
+            try:
+                os.rename(self.ruta_instancia, nueva_ruta)
+                self.ruta_instancia = nueva_ruta
+                self.nombre_instancia = nuevo_nombre
+            except Exception as e:
+                QMessageBox.critical(self, "Error", f"No se pudo renombrar la carpeta de la instancia:\n{e}")
+                return
+        
+        super().accept()
 
 
 class FTBDownloaderDialog(QDialog):
