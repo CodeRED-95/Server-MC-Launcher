@@ -5,6 +5,7 @@ import json
 import urllib.request
 import urllib.parse
 import urllib.error
+import webbrowser
 from PyQt6.QtWidgets import (QDialog, QPlainTextEdit, QLineEdit, QPushButton, 
                              QHBoxLayout, QVBoxLayout, QLabel, QComboBox, 
                              QProgressBar, QMessageBox, QFileDialog, QListWidget, QListWidgetItem)
@@ -79,8 +80,17 @@ class ConsoleWindow(QDialog):
         """)
         self.btn_stop_consola.clicked.connect(self.solicitar_stop.emit)
 
+        self.btn_subir_log = QPushButton("📤 Subir")
+        self.btn_subir_log.setAutoDefault(False)
+        self.btn_subir_log.setStyleSheet("""
+            QPushButton { background-color: #2563eb; color: white; font-weight: bold; padding: 6px 12px; border-radius: 4px; }
+            QPushButton:hover { background-color: #1d4ed8; }
+        """)
+        self.btn_subir_log.clicked.connect(self.subir_log_a_mclogs)
+
         layout_comandos = QHBoxLayout()
-        layout_comandos.addWidget(self.input_comando, stretch=4)
+        layout_comandos.addWidget(self.input_comando, stretch=3)
+        layout_comandos.addWidget(self.btn_subir_log, stretch=1)
         layout_comandos.addWidget(self.btn_stop_consola, stretch=1)
 
         layout = QVBoxLayout()
@@ -88,6 +98,47 @@ class ConsoleWindow(QDialog):
         layout.addWidget(self.consola)
         layout.addLayout(layout_comandos)
         self.setLayout(layout)
+
+    def subir_log_a_mclogs(self):
+        """Sube el contenido actual de la consola a mclo.gs."""
+        log_content = self.consola.toPlainText().strip()
+        if not log_content:
+            QMessageBox.warning(self, "Log vacío", "No hay contenido en la consola para subir.")
+            return
+
+        confirm = QMessageBox.question(
+            self, "Confirmar subida",
+            "¿Deseas subir el log actual a mclo.gs?\n\n"
+            "Esto generará un enlace público para compartir tus registros de errores.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+
+        if confirm == QMessageBox.StandardButton.Yes:
+            try:
+                # La API de mclo.gs requiere el contenido en el cuerpo de un POST (x-www-form-urlencoded)
+                url = "https://api.mclo.gs/1/log"
+                data = urllib.parse.urlencode({'content': log_content}).encode('utf-8')
+                req = urllib.request.Request(url, data=data, method='POST')
+                req.add_header('Content-Type', 'application/x-www-form-urlencoded')
+
+                with urllib.request.urlopen(req) as response:
+                    res_data = json.loads(response.read().decode('utf-8'))
+                    if res_data.get("success"):
+                        log_url = res_data.get("url")
+                        
+                        pregunta = QMessageBox.information(
+                            self, "Log Subido",
+                            f"El log se ha subido correctamente.\n\nEnlace: {log_url}\n\n¿Deseas abrir el link en el navegador?",
+                            QMessageBox.StandardButton.Open | QMessageBox.StandardButton.Close
+                        )
+                        
+                        if pregunta == QMessageBox.StandardButton.Open:
+                            webbrowser.open(log_url)
+                    else:
+                        error_msg = res_data.get("error", "Error desconocido")
+                        QMessageBox.critical(self, "Error al subir", f"mclo.gs devolvió un error: {error_msg}")
+            except Exception as e:
+                QMessageBox.critical(self, "Error de red", f"No se pudo conectar con mclo.gs:\n{e}")
 
 
 class ConfigGlobalDialog(QDialog):
