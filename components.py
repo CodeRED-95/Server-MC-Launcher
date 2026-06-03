@@ -422,7 +422,7 @@ class FTBDownloaderDialog(QDialog):
         self.btn_instalar.setEnabled(False)
         self.btn_buscar.setEnabled(False)
 
-        self.worker = FTBDownloadWorker(url_descarga_exe, ruta_instancia_destino, self.ruta_javas_raiz)
+        self.worker = FTBDownloadWorker(url_descarga_exe, ruta_instancia_destino, self.ruta_javas_raiz, id_modpack, id_version)
         self.worker.progreso.connect(self.barra_progreso.setValue)
         self.worker.estado.connect(self.lbl_estado.setText)
         self.worker.finalizado.connect(lambda exito, msg: self.instalacion_ftb_finalizada(exito, msg, ruta_instancia_destino, nombre_carpeta_final))

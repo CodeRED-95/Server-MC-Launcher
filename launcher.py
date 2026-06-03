@@ -159,7 +159,7 @@ class ServerLauncher(QMainWindow):
             self.cargar_instancias()
 
     def abrir_descargador_ftb(self):
-        dialogo = FTBDownloaderDialog(self.ruta_instancias, self)
+        dialogo = FTBDownloaderDialog(self.ruta_instancias, self.ruta_javas_raiz, self)
         if dialogo.exec() == QDialog.DialogCode.Accepted:
             self.cargar_instancias()
 

@@ -67,11 +67,13 @@ class FTBDownloadWorker(QThread):
     estado = pyqtSignal(str)
     finalizado = pyqtSignal(bool, str)
 
-    def __init__(self, url_instalador, ruta_destino_instancia, ruta_javas_raiz=None):
+    def __init__(self, url_instalador, ruta_destino_instancia, ruta_javas_raiz=None, id_modpack=None, id_version=None):
         super().__init__()
         self.url_instalador = url_instalador
         self.ruta_destino_instancia = ruta_destino_instancia
         self.ruta_javas_raiz = ruta_javas_raiz
+        self.id_modpack = str(id_modpack) if id_modpack else ""
+        self.id_version = str(id_version) if id_version else ""
 
     def run(self):
         try:
@@ -81,8 +83,10 @@ class FTBDownloadWorker(QThread):
             self.estado.emit("Descargando instalador nativo oficial (.exe)...")
             self.progreso.emit(20)
             
-            # Renombramos para intentar evitar la detección heurística de 'installer' de Windows
-            ruta_instalador_exe = os.path.join(self.ruta_destino_instancia, "ftb_dl.exe")
+            # El instalador de FTB espera encontrar el ID del modpack y la versión en su propio nombre de archivo.
+            # Formato esperado: serverinstall_<id_modpack>_<id_version>.exe
+            nombre_ejecutable = f"serverinstall_{self.id_modpack}_{self.id_version}.exe"
+            ruta_instalador_exe = os.path.join(self.ruta_destino_instancia, nombre_ejecutable)
             
             # Descargamos el ejecutable limpio de FTB
             req = urllib.request.Request(self.url_instalador, headers={
@@ -98,7 +102,7 @@ class FTBDownloadWorker(QThread):
             self.progreso.emit(45)
             self.estado.emit("Abriendo el asistente de instalación interactivo...")
 
-            # Intentamos localizar un Java portable para ayudar al instalador
+            # Localizamos Java portable para inyectarlo al PATH
             java_bin_aux = None
             if self.ruta_javas_raiz and os.path.exists(self.ruta_javas_raiz):
                 for raiz, dirs, archivos in os.walk(self.ruta_javas_raiz):
@@ -106,14 +110,28 @@ class FTBDownloadWorker(QThread):
                         java_bin_aux = raiz
                         break
 
-            # Preparamos el entorno con el PATH de Java si existe
             env_instalacion = os.environ.copy()
             if java_bin_aux:
+                # Inyectamos JAVA_HOME y PATH para que el instalador de Forge/Fabric no falle
+                java_home = os.path.dirname(java_bin_aux)
+                env_instalacion["JAVA_HOME"] = java_home
                 env_instalacion["PATH"] = java_bin_aux + os.pathsep + env_instalacion.get("PATH", "")
 
-            # Lanzamos el proceso vinculando la consola de entrada y salida de datos de texto
+            # SEGÚN EL REPO DE FTB: 
+            # Uso: ftb-server-installer <modpack_id> [version_id] --path [ruta] --auto
+            # --auto: Acepta todas las preguntas (EULA, Java, etc.) automáticamente.
+            # --path: Especifica dónde instalar.
+            
+            # Evitamos pasar argumentos vacíos si no hay IDs definidos
+            argumentos = [ruta_instalador_exe]
+            if self.id_modpack:
+                argumentos.append(self.id_modpack)
+                if self.id_version:
+                    argumentos.append(self.id_version)
+            argumentos.extend(["--path", self.ruta_destino_instancia, "--auto"])
+
             proceso = subprocess.Popen(
-                [ruta_instalador_exe],
+                argumentos,
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT, # Unifica errores con la salida regular
@@ -125,44 +143,27 @@ class FTBDownloadWorker(QThread):
                 encoding='utf-8', errors='replace'
             )
 
-            # Monitoreo inteligente de las preguntas del instalador en tiempo real
-            buffer_lineas = ""
+            # Ahora solo leemos la salida para informar al usuario del progreso, 
+            # ya no necesitamos escribir en stdin gracias a --auto
             while True:
-                # Leemos caracter por caracter para interceptar las preguntas antes del salto de línea
-                char = proceso.stdout.read(1)
-                if not char:
+                linea = proceso.stdout.readline()
+                if not linea:
                     break
                 
-                buffer_lineas += char
-                print(char, end="") # Para depurar en tu consola de VS Code si fuera necesario
+                linea_limpia = linea.strip()
+                lower_linea = linea_limpia.lower()
+                
+                # Emitir siempre la línea para que el usuario vea progreso real
+                if linea_limpia:
+                    # Filtramos líneas que son solo progreso visual (muchos puntos o barras)
+                    if not all(c in '.#= █' for c in linea_limpia):
+                        # Mostramos el mensaje del instalador directamente en la UI
+                        self.estado.emit(f"FTB: {linea_limpia}")
 
-                # Pregunta 1: Do you want to continue? [Y/n]
-                if "want to continue?" in buffer_lineas and ("[" in buffer_lineas or ":" in buffer_lineas):
-                    self.estado.emit("Configurando directorio: Enviando confirmación (Yes)...")
-                    self.progreso.emit(55)
-                    proceso.stdin.write("Y\n")
-                    proceso.stdin.flush()
-                    buffer_lineas = ""
-
-                # Pregunta 2: Do you want to download java? [Y/n]
-                elif "download java?" in buffer_lineas and ("[" in buffer_lineas or ":" in buffer_lineas):
-                    self.estado.emit("Saltando descarga de Java (Usando entorno del launcher)...")
-                    self.progreso.emit(65)
-                    proceso.stdin.write("n\n")
-                    proceso.stdin.flush()
-                    buffer_lineas = ""
-
-                # Pregunta 3: Would you like to run the neoforge/forge installer? [Y/n]
-                elif "run the" in buffer_lineas and "installer?" in buffer_lineas and ("[" in buffer_lineas or ":" in buffer_lineas):
-                    self.estado.emit("Instalando ModLoader requerido del servidor (Forge/NeoForge)...")
-                    self.progreso.emit(80)
-                    proceso.stdin.write("Y\n")
-                    proceso.stdin.flush()
-                    buffer_lineas = ""
-
-                # Si detecta el éxito del proceso
-                elif "modpack files downloaded" in lower_buffer:
-                    self.estado.emit("Descargando e integrando mods en el servidor...")
+                # Actualizaciones lógicas de la barra de progreso
+                if "modpack files downloaded" in lower_linea:
+                    self.progreso.emit(90)
+                    self.estado.emit("¡Archivos base listos! Finalizando...")
 
             # Esperamos que finalice de escribir todos los archivos en disco
             proceso.wait()
