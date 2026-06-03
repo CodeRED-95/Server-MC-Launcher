@@ -61,8 +61,10 @@ class DownloaderWorker(QThread):
             self.finalizado.emit(False, str(e))
 
 
+# Modifica esta clase dentro de workers.py
+
 class FTBDownloadWorker(QThread):
-    """Hilo para descargar y ejecutar el instalador oficial de servidores de FTB."""
+    """Hilo para descargar y ejecutar el instalador universal de servidores de FTB."""
     progreso = pyqtSignal(int)
     estado = pyqtSignal(str)
     finalizado = pyqtSignal(bool, str)
@@ -77,23 +79,26 @@ class FTBDownloadWorker(QThread):
     def run(self):
         try:
             import urllib.request
+            import subprocess
             if not os.path.exists(self.ruta_destino_instancia):
                 os.makedirs(self.ruta_destino_instancia)
 
-            self.estado.emit("Descargando instalador oficial de FTB...")
-            self.progreso.emit(10)
+            self.estado.emit("Descargando instalador universal (JAR)...")
+            self.progreso.emit(15)
             
-            ruta_instalador_exe = os.path.join(self.ruta_destino_instancia, "ftb_installer.exe")
+            # Descargamos el archivo como .jar en lugar de .exe
+            ruta_instalador_jar = os.path.join(self.ruta_destino_instancia, "ftb_installer.jar")
             
             req = urllib.request.Request(self.url_instalador, headers={'User-Agent': 'Mozilla/5.0'})
-            with urllib.request.urlopen(req) as response, open(ruta_instalador_exe, 'wb') as out_file:
+            with urllib.request.urlopen(req) as response, open(ruta_instalador_jar, 'wb') as out_file:
                 out_file.write(response.read())
             
             self.progreso.emit(40)
-            self.estado.emit("Instalando archivos del servidor FTB (Esto puede tardar varios minutos)...")
+            self.estado.emit("Instalando archivos del servidor vía Java (Un momento)...")
 
+            # Ejecutamos el instalador usando "java -jar" de manera universal
             comando = [
-                ruta_instalador_exe,
+                "java", "-jar", ruta_instalador_jar,
                 str(self.id_modpack),
                 str(self.id_version),
                 "--path", self.ruta_destino_instancia,
@@ -110,13 +115,13 @@ class FTBDownloadWorker(QThread):
             
             self.progreso.emit(90)
             
-            if os.path.exists(ruta_instalador_exe):
-                os.remove(ruta_instalador_exe)
+            if os.path.exists(ruta_instalador_jar):
+                os.remove(ruta_instalador_jar)
 
             if proceso.returncode == 0:
                 self.finalizado.emit(True, "Servidor de FTB descargado e instalado correctamente.")
             else:
-                self.finalizado.emit(False, f"El instalador de FTB falló: {proceso.stderr}")
+                self.finalizado.emit(False, f"El instalador falló. Verifique que tenga Java instalado en su PATH.\\nDetalle: {proceso.stderr}")
 
         except Exception as e:
             self.finalizado.emit(False, str(e))

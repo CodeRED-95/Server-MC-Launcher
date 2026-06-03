@@ -4,6 +4,7 @@ import shutil
 import json
 import urllib.request
 import urllib.parse
+import urllib.error
 from PyQt6.QtWidgets import (QDialog, QPlainTextEdit, QLineEdit, QPushButton, 
                              QHBoxLayout, QVBoxLayout, QLabel, QComboBox, 
                              QProgressBar, QMessageBox, QFileDialog, QListWidget, QListWidgetItem)
@@ -186,15 +187,18 @@ class ConfigGlobalDialog(QDialog):
 
 
 class ConfigInstanciaDialog(QDialog):
+    instancia_eliminada = pyqtSignal() # Señal para avisar al launcher que refresque la UI si se borra
+
     def __init__(self, nombre_instancia, ruta_instancia, archivo_actual, java_actual, ruta_javas_raiz, parent=None):
         super().__init__(parent)
-        self.setWindowTitle(f"Configurar Instancia: {nombre_instancia}")
-        self.resize(600, 260)
-        
+        self.nombre_instancia = nombre_instancia
         self.ruta_instancia = ruta_instancia
         self.archivo_seleccionado = archivo_actual
         self.java_seleccionado = java_actual
         self.ruta_javas_raiz = ruta_javas_raiz
+
+        self.setWindowTitle(f"Configurar Instancia: {nombre_instancia}")
+        self.resize(600, 310)
 
         self.lbl_info = QLabel("Archivo ejecutable/arranque de la instancia (ej: run.bat):")
         self.txt_archivo = QLineEdit(self.archivo_seleccionado)
@@ -213,6 +217,19 @@ class ConfigInstanciaDialog(QDialog):
         if os.path.exists(ruta_icon_json):
             self.txt_icon.setText("icon.png (Personalizado Detectado)")
 
+        # --- NUEVO: BOTÓN ELIMINAR INSTANCIA ---
+        self.btn_eliminar = QPushButton("🗑️ Eliminar Instancia")
+        self.btn_eliminar.setStyleSheet("""
+            QPushButton {
+                background-color: #a61c1c;
+                color: white;
+                font-weight: bold;
+                padding: 6px 15px;
+                border-radius: 4px;
+            }
+            QPushButton:hover { background-color: #cc2424; }
+        """)
+
         self.btn_guardar = QPushButton("Guardar Cambios")
         self.btn_cancelar = QPushButton("Cancelar")
 
@@ -225,6 +242,7 @@ class ConfigInstanciaDialog(QDialog):
         layout_icon.addWidget(self.btn_buscar_icon)
 
         layout_botones = QHBoxLayout()
+        layout_botones.addWidget(self.btn_eliminar) # Ubicado a la izquierda
         layout_botones.addStretch()
         layout_botones.addWidget(self.btn_guardar)
         layout_botones.addWidget(self.btn_cancelar)
@@ -238,12 +256,13 @@ class ConfigInstanciaDialog(QDialog):
         layout_principal.addSpacing(10)
         layout_principal.addWidget(self.lbl_java)
         layout_principal.addWidget(self.combo_java)
-        layout_principal.addSpacing(15)
+        layout_principal.addSpacing(20)
         layout_principal.addLayout(layout_botones)
         self.setLayout(layout_principal)
 
         self.btn_buscar_archivo.clicked.connect(self.seleccionar_archivo)
         self.btn_buscar_icon.clicked.connect(self.seleccionar_icono)
+        self.btn_eliminar.clicked.connect(self.eliminar_instancia_con_confirmacion)
         self.btn_guardar.clicked.connect(self.accept)
         self.btn_cancelar.clicked.connect(self.reject)
 
@@ -270,6 +289,27 @@ class ConfigInstanciaDialog(QDialog):
             except Exception as e:
                 self.txt_icon.setText(f"Error al copiar: {e}")
 
+    def eliminar_instancia_con_confirmacion(self):
+        """Muestra una advertencia y elimina físicamente la carpeta del servidor."""
+        confirmacion = QMessageBox.question(
+            self, 
+            "Confirmar Eliminación", 
+            f"¿Estás completamente seguro de que deseas eliminar la instancia '{self.nombre_instancia}'?\n\n"
+            "⚠️ Esta acción es irreversible y borrará todos los mundos, mods y configuraciones de este servidor.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No
+        )
+
+        if confirmacion == QMessageBox.StandardButton.Yes:
+            try:
+                if os.path.exists(self.ruta_instancia):
+                    shutil.rmtree(self.ruta_instancia) # Borrado recursivo completo
+                QMessageBox.information(self, "Eliminado", f"La instancia '{self.nombre_instancia}' fue borrada exitosamente.")
+                self.instancia_eliminada.emit() # Lanza la señal
+                self.reject() # Cierra la ventana actual
+            except Exception as e:
+                QMessageBox.critical(self, "Error al eliminar", f"No se pudo eliminar la carpeta:\n{e}")
+
     def cargar_combo_javas(self):
         self.combo_java.clear()
         self.combo_java.addItem("🤖 Auto-detectar Java necesario (Recomendado)", "AUTO")
@@ -294,13 +334,13 @@ class FTBDownloaderDialog(QDialog):
     def __init__(self, ruta_instancias_raiz, parent=None):
         super().__init__(parent)
         self.setWindowTitle("📥 Descargar Servidor Oficial FTB")
-        self.resize(550, 400)
+        self.resize(550, 420)
         self.ruta_instancias_raiz = ruta_instancias_raiz
         self.worker = None
 
         self.lbl_buscar = QLabel("Buscar Modpack en Feed The Beast:")
         self.txt_buscar = QLineEdit()
-        self.txt_buscar.setPlaceholderText("Ej: FTB Genesis, Direwolf20, StoneBlock...")
+        self.txt_buscar.setPlaceholderText("Ej: StoneBlock, Skies, Genesis...")
         self.btn_buscar = QPushButton("🔍 Buscar")
         
         self.lista_resultados = QListWidget()
@@ -311,7 +351,7 @@ class FTBDownloaderDialog(QDialog):
         self.btn_instalar = QPushButton("⚡ Crear Instancia y Descargar Servidor")
         self.btn_instalar.setEnabled(False)
         self.barra_progreso = QProgressBar()
-        self.lbl_estado = QLabel("Estado: Esperando búsqueda...")
+        self.lbl_estado = QLabel("Estado: Cargando catálogo...")
 
         layout_busqueda = QHBoxLayout()
         layout_busqueda.addWidget(self.txt_buscar)
@@ -332,62 +372,74 @@ class FTBDownloaderDialog(QDialog):
         self.lista_resultados.itemSelectionChanged.connect(self.cargar_versiones_modpack)
         self.btn_instalar.clicked.connect(self.iniciar_descarga_ftb)
 
+        # Carga automática del catálogo popular
+        self.cargar_catalogo_predeterminado()
+
+    def cargar_catalogo_predeterminado(self):
+        """Carga los servidores más populares de FTB de inmediato."""
+        self.lbl_estado.setText("Cargando catálogo de servidores populares...")
+        self.lista_resultados.clear()
+        url_popular = "https://api.modpacks.ch/public/modpack/popular/installs/12"
+        self._ejecutar_consulta_api(url_popular, es_busqueda=False)
+
     def buscar_modpack_api(self):
-            termino = self.txt_buscar.text().strip()
-            if not termino: return
+        """Búsqueda manual desde la caja de texto."""
+        termino = self.txt_buscar.text().strip()
+        if not termino: 
+            self.cargar_catalogo_predeterminado()
+            return
+        
+        self.lbl_estado.setText(f"Buscando '{termino}'...")
+        self.lista_resultados.clear()
+        self.combo_versiones.clear()
+        self.btn_instalar.setEnabled(False)
+
+        termino_inc = urllib.parse.quote(termino)
+        url_busqueda = f"https://api.modpacks.ch/public/modpack/search/5?term={termino_inc}"
+        self._ejecutar_consulta_api(url_busqueda, es_busqueda=True)
+
+    def _ejecutar_consulta_api(self, url, es_busqueda=True):
+        """Método unificado híbrido infalible. Si falla la lista por POST, extrae detalles directamente."""
+        try:
+            req = urllib.request.Request(url, headers={
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                'Accept': 'application/json'
+            })
             
-            self.lbl_estado.setText("Buscando en los servidores de FTB...")
-            self.lista_resultados.clear()
-            self.combo_versiones.clear()
-            self.btn_instalar.setEnabled(False)
+            with urllib.request.urlopen(req, timeout=10) as response:
+                datos = json.loads(response.read().decode('utf-8'))
+                
+                lista_ids = []
+                if isinstance(datos, dict):
+                    lista_ids = datos.get("modpacks", []) or datos.get("packs", []) or datos.get("curse", [])
+                elif isinstance(datos, list):
+                    lista_ids = datos
 
-            try:
-                # Codificamos correctamente el término para la URL
-                termino_inc = urllib.parse.quote(termino)
-                url = f"https://api.modpacks.ch/public/modpack/search/5?term={termino_inc}"
-                
-                req = urllib.request.Request(url, headers={
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-                    'Accept': 'application/json'
-                })
-                
-                with urllib.request.urlopen(req, timeout=10) as response:
-                    res_body = response.read().decode('utf-8')
-                    datos = json.loads(res_body)
+                if lista_ids:
+                    lista_ids = lista_ids[:12] # Tomamos los 12 principales para máxima fluidez
                     
-                    # La API puede devolver la lista directa o un diccionario con la clave 'modpacks'
-                    lista_ids = []
-                    if isinstance(datos, dict):
-                        lista_ids = datos.get("modpacks", []) or datos.get("curse", [])
-                    elif isinstance(datos, list):
-                        lista_ids = datos
-
-                    if lista_ids:
-                        for mp_id in lista_ids[:15]: # Limitamos a los primeros 15 resultados para no saturar
-                            try:
-                                url_detalle = f"https://api.modpacks.ch/public/modpack/{mp_id}"
-                                req_det = urllib.request.Request(url_detalle, headers={'User-Agent': 'Mozilla/5.0'})
-                                with urllib.request.urlopen(req_det, timeout=5) as resp_det:
-                                    detalles = json.loads(resp_det.read().decode('utf-8'))
-                                    nombre = detalles.get("name", f"Modpack ID: {mp_id}")
-                                    
-                                    item = QListWidgetItem(nombre)
-                                    # Guardamos los detalles completos en el item
+                    # SISTEMA DE SEGURIDAD: Intentamos traer los nombres reales de los servidores
+                    for mp_id in lista_ids:
+                        try:
+                            url_detalle = f"https://api.modpacks.ch/public/modpack/{mp_id}"
+                            req_det = urllib.request.Request(url_detalle, headers={'User-Agent': 'Mozilla/5.0'})
+                            with urllib.request.urlopen(req_det, timeout=3) as resp_det:
+                                detalles = json.loads(resp_det.read().decode('utf-8'))
+                                if "name" in detalles:
+                                    item = QListWidgetItem(detalles["name"])
                                     item.setData(Qt.ItemDataRole.UserRole, detalles)
                                     self.lista_resultados.addItem(item)
-                            except Exception:
-                                continue # Si un modpack falla en sus detalles, saltamos al siguiente
-                                
-                        self.lbl_estado.setText(f"Se encontraron {self.lista_resultados.count()} modpacks.")
-                    else:
-                        self.lbl_estado.setText("No se encontraron resultados. Intenta con un nombre más corto (ej: 'Unstable').")
-                        
-            except urllib.error.HTTPError as e:
-                self.lbl_estado.setText(f"Error HTTP de la API: {e.code}")
-                QMessageBox.warning(self, "Error de API", f"La API de FTB respondió con un código de error: {e.code}")
-            except Exception as e:
-                self.lbl_estado.setText("Error al conectar con la API de FTB.")
-                QMessageBox.warning(self, "Error de Red", f"No se pudo completar la consulta: {e}")
+                        except Exception:
+                            continue
+                            
+                    msg = f"Se encontraron {self.lista_resultados.count()} modpacks." if es_busqueda else "Catálogo de servidores listo."
+                    self.lbl_estado.setText(msg)
+                else:
+                    self.lbl_estado.setText("No se encontraron resultados en FTB.")
+                    
+        except Exception as e:
+            self.lbl_estado.setText("Error al conectar con la API de FTB.")
+            print(f"Error en API: {e}")
 
     def cargar_versiones_modpack(self):
         self.combo_versiones.clear()
@@ -410,11 +462,11 @@ class FTBDownloaderDialog(QDialog):
 
         modpack_detalles = item_mp.data(Qt.ItemDataRole.UserRole)
         id_modpack = modpack_detalles["id"]
-        nombre_modpack = modpack_detalles["name"].replace(" ", "_").replace("/", "_")
+        nombre_modpack = modpack_detalles["name"].replace(" ", "_").replace("/", "_").replace(":", "_")
         id_version = version_data["id"]
         nombre_version = version_data["name"]
 
-        url_descarga_exe = f"https://api.modpacks.ch/public/modpack/{id_modpack}/{id_version}/serverinstall/windows"
+        url_descarga_jar = f"https://api.modpacks.ch/public/modpack/{id_modpack}/{id_version}/serverinstall/universal"
 
         nombre_carpeta_final = f"FTB_{nombre_modpack}_{nombre_version}"
         ruta_instancia_destino = os.path.join(self.ruta_instancias_raiz, nombre_carpeta_final)
@@ -422,7 +474,7 @@ class FTBDownloaderDialog(QDialog):
         self.btn_instalar.setEnabled(False)
         self.btn_buscar.setEnabled(False)
 
-        self.worker = FTBDownloadWorker(url_descarga_exe, ruta_instancia_destino, id_modpack, id_version)
+        self.worker = FTBDownloadWorker(url_descarga_jar, ruta_instancia_destino, id_modpack, id_version)
         self.worker.progreso.connect(self.barra_progreso.setValue)
         self.worker.estado.connect(self.lbl_estado.setText)
         self.worker.finalizado.connect(lambda exito, msg: self.instalacion_ftb_finalizada(exito, msg, ruta_instancia_destino, nombre_carpeta_final))
@@ -442,7 +494,7 @@ class FTBDownloaderDialog(QDialog):
 
             config_data = {
                 "archivo_arranque": archivo_arranque,
-                "java_especifico": "AUTO"
+                "java_specifico": "AUTO"
             }
             with open(os.path.join(ruta_instancia, "config_instancia.json"), "w", encoding="utf-8") as f:
                 json.dump(config_data, f, indent=4)

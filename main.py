@@ -6,7 +6,6 @@ from launcher import ServerLauncher
 if __name__ == "__main__":
     app = QApplication(sys.argv)
     
-    # Podrías agregar configuraciones globales de estilos de la App aquí
     ventana = ServerLauncher()
     ventana.show()
     

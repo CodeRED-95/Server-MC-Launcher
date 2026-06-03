@@ -152,6 +152,11 @@ class ServerLauncher(QMainWindow):
         nombre_carpeta = item.text()
         ruta_servidor = os.path.join(self.ruta_instancias, nombre_carpeta)
         archivo_actual, java_actual = self.obtener_datos_instancia(ruta_servidor)
+        dialogo = ConfigInstanciaDialog(nombre_carpeta, ruta_servidor, archivo_actual, java_actual, self.ruta_javas_raiz, self)
+        
+        # OBLIGAMOS A RESPONDER AL BORRADO REDIBUJANDO EL LAUNCHER FÍSICO
+        dialogo.instancia_eliminada.connect(self.cargar_instancias) 
+        
 
         dialogo = ConfigInstanciaDialog(nombre_carpeta, ruta_servidor, archivo_actual, java_actual, self.ruta_javas_raiz, self)
         if dialogo.exec() == QDialog.DialogCode.Accepted:
@@ -310,13 +315,12 @@ class ServerLauncher(QMainWindow):
             self.proceso_server.setProcessEnvironment(env)
             self.proceso_server.setWorkingDirectory(ruta_servidor)
 
+            # --- SOLUCIÓN: FORZAR NOGUI STRICT PARA EVITAR LA VENTANA BLANCA NATIVA ---
             if ejecutable.endswith(".bat"):
                 comando = "cmd.exe"
-                # Añadimos nogui al final de la ejecución por lotes
                 argumentos = ["/c", ejecutable, "nogui"]
             else:
                 comando = java_exe_real
-                # Forzamos nogui estrictamente como argumento independiente para el archivo .jar
                 argumentos = ["-Xmx2G", "-Xms1G", "-jar", ejecutable, "nogui"]
 
             self.actualizar_estado_botones()
