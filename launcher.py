@@ -30,7 +30,6 @@ class DownloaderWorker(QThread):
             import urllib.request
             self.estado.emit("Descargando paquete de Java (OpenJDK)...")
             
-            # Conexión y descarga con reporte de progreso
             req = urllib.request.Request(self.url, headers={'User-Agent': 'Mozilla/5.0'})
             with urllib.request.urlopen(req) as response:
                 total_size = int(response.info().get('Content-Length', 0))
@@ -51,12 +50,10 @@ class DownloaderWorker(QThread):
             self.estado.emit("Extrayendo archivos de entorno portable...")
             self.progreso.emit(0)
             
-            # Extracción del ZIP
             with zipfile.ZipFile(self.destino_zip, 'r') as zip_ref:
                 lista_archivos = zip_ref.namelist()
                 total_archivos = len(lista_archivos)
                 
-                # Crear el directorio raíz de extracción si no existe
                 if not os.path.exists(self.carpeta_extraccion):
                     os.makedirs(self.carpeta_extraccion)
 
@@ -65,7 +62,6 @@ class DownloaderWorker(QThread):
                     if total_archivos > 0:
                         self.progreso.emit(int(((i + 1) / total_archivos) * 100))
 
-            # Limpieza del instalador comprimido temporal
             if os.path.exists(self.destino_zip):
                 os.remove(self.destino_zip)
 
@@ -107,7 +103,6 @@ class ConsoleWindow(QDialog):
             }
         """)
 
-        # Botón dedicado para apagar el servidor directamente desde aquí
         self.btn_stop_consola = QPushButton("🛑 Detener Servidor")
         self.btn_stop_consola.setStyleSheet("""
             QPushButton {
@@ -142,7 +137,6 @@ class ConfigGlobalDialog(QDialog):
         self.ruta_javas_raiz = ruta_javas_raiz
         self.worker = None
 
-        # --- SECCIÓN CARPETAS ---
         self.lbl_instancias = QLabel("Ruta raíz de la carpeta de Instancias:")
         self.txt_instancias = QLineEdit(self.ruta_instancias)
         self.txt_instancias.setReadOnly(True)
@@ -153,12 +147,10 @@ class ConfigGlobalDialog(QDialog):
         self.txt_javas_raiz.setReadOnly(True)
         self.btn_buscar_javas = QPushButton("Examinar...")
 
-        # --- SECCIÓN GESTOR DE DESCARGAS JAVA ---
         self.lbl_downloader = QLabel("📥 Descargar versiones de Java Runtime portables necesarias:")
         self.lbl_downloader.setStyleSheet("font-weight: bold; margin-top: 10px;")
         
         self.combo_descargas = QComboBox()
-        # URLs oficiales pre-configuradas para descargas portables de Eclipse Temurin (Windows x64)
         self.combo_descargas.addItem("Java 8 (Recomendado para servidores Minecraft antiguos 1.7 - 1.12)", "https://github.com/adoptium/temurin8-binaries/releases/download/jdk8u412-b08/OpenJDK8U-jdk_x64_windows_hotspot_8u412b08.zip")
         self.combo_descargas.addItem("Java 17 (Recomendado para servidores de versiones 1.17 a 1.20.4)", "https://github.com/adoptium/temurin17-binaries/releases/download/jdk-17.0.11%2B9/OpenJDK17U-jdk_x64_windows_hotspot_17.0.11_9.zip")
         self.combo_descargas.addItem("Java 21 (Recomendado para servidores modernos 1.20.5+ y superiores)", "https://github.com/adoptium/temurin21-binaries/releases/download/jdk-21.0.3%2B9/OpenJDK21U-jdk_x64_windows_hotspot_21.0.3_9.zip")
@@ -171,7 +163,6 @@ class ConfigGlobalDialog(QDialog):
         self.btn_guardar = QPushButton("Guardar y Cerrar")
         self.btn_cancelar = QPushButton("Cancelar")
 
-        # Layouts
         layout_instancias = QHBoxLayout()
         layout_instancias.addWidget(self.txt_instancias)
         layout_instancias.addWidget(self.btn_buscar_instancias)
@@ -206,7 +197,6 @@ class ConfigGlobalDialog(QDialog):
         layout_principal.addLayout(layout_botones)
         self.setLayout(layout_principal)
 
-        # Conexiones
         self.btn_buscar_instancias.clicked.connect(self.seleccionar_instancias)
         self.btn_buscar_javas.clicked.connect(self.seleccionar_carpeta_javas)
         self.btn_descargar_java.clicked.connect(self.iniciar_descarga_java)
@@ -237,7 +227,6 @@ class ConfigGlobalDialog(QDialog):
         self.btn_descargar_java.setEnabled(False)
         self.combo_descargas.setEnabled(False)
 
-        # Iniciar Worker en hilo separado para no bloquear la GUI
         self.worker = DownloaderWorker(url, destino_zip, self.ruta_javas_raiz)
         self.worker.progreso.connect(self.barra_progreso.setValue)
         self.worker.estado.connect(self.lbl_estado_descarga.setText)
@@ -566,7 +555,6 @@ class ServerLauncher(QMainWindow):
         javas_disponibles = {}
         if not self.ruta_javas_raiz or not os.path.exists(self.ruta_javas_raiz): return javas_disponibles
         
-        # Escaneo recursivo para buscar ejecutables java.exe (soporta la extracción directa de carpetas comprimidas)
         for raiz, directorios, archivos in os.walk(self.ruta_javas_raiz):
             if "java.exe" in archivos:
                 ruta_exe = os.path.join(raiz, "java.exe")
@@ -593,12 +581,21 @@ class ServerLauncher(QMainWindow):
                 if f.endswith(".jar") and ("forge" in f or "fabric" in f or "paper" in f or "server" in f):
                     jar_principal = os.path.join(ruta_servidor, f)
                     break
+                    
         if os.path.exists(jar_principal):
             version_requerida = self.detectar_version_java_de_jar(jar_principal)
+            
         diccionario_javas = self.escanear_versiones_en_carpeta_javas()
-        if version_requerida in diccionario_javas: return diccionario_javas[version_requerida]
-        if diccionario_javas: return diccionario_javas[sorted(diccionario_javas.keys(), reverse=True)[0]]
-        return None
+        
+        # --- VERIFICACIÓN DE ERROR POR AUSENCIA TOTAL ---
+        if not diccionario_javas:
+            return "ERROR_VACIO"
+
+        if version_requerida in diccionario_javas: 
+            return diccionario_javas[version_requerida]
+            
+        # Si la versión exacta no existe, devolvemos "ERROR_INCOMPATIBLE" en lugar de fallar silenciosamente
+        return "ERROR_INCOMPATIBLE"
 
     def detener_servidor_desde_consola(self):
         if self.proceso_server.state() == QProcess.ProcessState.Running:
@@ -615,20 +612,41 @@ class ServerLauncher(QMainWindow):
             ruta_servidor = os.path.join(self.ruta_instancias, nombre_carpeta)
             ejecutable, java_especifico = self.obtener_datos_instancia(ruta_servidor)
             
+            # 1. Resolver ruta del binario Java
             if java_especifico == "AUTO" or not java_especifico:
                 java_exe_real = self.seleccionar_mejor_java(ruta_servidor)
             else:
-                # Buscar dinámicamente si existe la subcarpeta específica
                 java_exe_real = None
                 for raiz, _, archivos in os.walk(os.path.join(self.ruta_javas_raiz, java_especifico)):
                     if "java.exe" in archivos:
                         java_exe_real = os.path.join(raiz, "java.exe")
                         break
 
-            if not java_exe_real or not ejecutable: 
-                QMessageBox.critical(self, "Falta Entorno", "No se pudo localizar un ejecutable válido de Java para esta instancia. Ve a Configuración General y descarga una versión compatible.")
+            # 2. CAPTURA Y MANEJO DE ERRORES CON VENTANA DE DIÁLOGO (CRITICAL)
+            if java_exe_real == "ERROR_VACIO" or not os.path.exists(self.ruta_javas_raiz) or len(os.listdir(self.ruta_javas_raiz)) <= 1:
+                QMessageBox.critical(
+                    self, 
+                    "Error de Entorno Java", 
+                    "No se ha encontrado ninguna versión de Java instalada en el Gestor Portable.\n\n"
+                    "Por favor, ve a '⚙️ Configuración General / Javas' y descarga la versión recomendada."
+                )
+                return
+                
+            if java_exe_real == "ERROR_INCOMPATIBLE" or java_exe_real is None:
+                QMessageBox.critical(
+                    self, 
+                    "Java Incompatible u Oculto", 
+                    f"La instancia '{nombre_carpeta}' requiere una versión específica de Java que no está disponible o no se puede auto-detectar de forma óptima.\n\n"
+                    "Solución:\n1. Abre 'Configuración General' y descarga la versión de Java que le corresponda.\n"
+                    "2. Abre 'Configurar Instancia' y fuerza manualmente la carpeta de Java asignada."
+                )
                 return
 
+            if not ejecutable:
+                QMessageBox.critical(self, "Falta Ejecutable", "No se detectó ningún script de inicio (.bat) o archivo .jar principal en la carpeta de la instancia.")
+                return
+
+            # Si todo está correcto, procede a iniciar el servidor
             self.instancia_actual = nombre_carpeta
 
             self.ventana_consola = ConsoleWindow(nombre_carpeta, self)
