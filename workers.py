@@ -67,10 +67,11 @@ class FTBDownloadWorker(QThread):
     estado = pyqtSignal(str)
     finalizado = pyqtSignal(bool, str)
 
-    def __init__(self, url_instalador, ruta_destino_instancia):
+    def __init__(self, url_instalador, ruta_destino_instancia, ruta_javas_raiz=None):
         super().__init__()
         self.url_instalador = url_instalador
         self.ruta_destino_instancia = ruta_destino_instancia
+        self.ruta_javas_raiz = ruta_javas_raiz
 
     def run(self):
         try:
@@ -97,15 +98,31 @@ class FTBDownloadWorker(QThread):
             self.progreso.emit(45)
             self.estado.emit("Abriendo el asistente de instalación interactivo...")
 
+            # Intentamos localizar un Java portable para ayudar al instalador
+            java_bin_aux = None
+            if self.ruta_javas_raiz and os.path.exists(self.ruta_javas_raiz):
+                for raiz, dirs, archivos in os.walk(self.ruta_javas_raiz):
+                    if "java.exe" in archivos:
+                        java_bin_aux = raiz
+                        break
+
+            # Preparamos el entorno con el PATH de Java si existe
+            env_instalacion = os.environ.copy()
+            if java_bin_aux:
+                env_instalacion["PATH"] = java_bin_aux + os.pathsep + env_instalacion.get("PATH", "")
+
             # Lanzamos el proceso vinculando la consola de entrada y salida de datos de texto
             proceso = subprocess.Popen(
                 [ruta_instalador_exe],
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT, # Unifica errores con la salida regular
+                env=env_instalacion,
                 text=True,
+                bufsize=1, # Line buffered
                 cwd=self.ruta_destino_instancia, # Se ejecuta dentro de la carpeta destino
-                creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
+                creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0,
+                encoding='utf-8', errors='replace'
             )
 
             # Monitoreo inteligente de las preguntas del instalador en tiempo real
@@ -144,7 +161,7 @@ class FTBDownloadWorker(QThread):
                     buffer_lineas = ""
 
                 # Si detecta el éxito del proceso
-                elif "Modpack files downloaded" in buffer_lineas:
+                elif "modpack files downloaded" in lower_buffer:
                     self.estado.emit("Descargando e integrando mods en el servidor...")
 
             # Esperamos que finalice de escribir todos los archivos en disco
