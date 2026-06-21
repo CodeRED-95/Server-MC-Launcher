@@ -4,9 +4,11 @@ import json
 import struct
 import zipfile
 import ctypes
+import re
 from PyQt6.QtWidgets import (QMainWindow, QPushButton, QVBoxLayout, QHBoxLayout,
                              QWidget, QListWidget, QListWidgetItem, QLabel, 
-                             QDialog, QMessageBox, QFileDialog)
+                             QDialog, QMessageBox, QFileDialog, QGroupBox,
+                             QCheckBox, QPlainTextEdit)
 from PyQt6.QtCore import QProcess, QProcessEnvironment, Qt, QSize, QFileSystemWatcher
 from PyQt6.QtGui import QIcon
 
@@ -16,13 +18,18 @@ class ServerLauncher(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Minecraft Server Launcher Grid Pro")
-        self.resize(1000, 600)
+        self.resize(1120, 650)
 
         self.ARCHIVO_CONFIG_GLOBAL = os.path.join(os.path.dirname(__file__), "config.json")
+        self.RUTA_ICONO_APP = os.path.join(os.path.dirname(__file__), "assets", "app_icon.png")
         self.ruta_instancias = ""
         self.ruta_javas_raiz = ""
+        self.ruta_playit = ""
+        self.playit_auto = True
         
         self.cargar_configuracion_global()
+        if os.path.exists(self.RUTA_ICONO_APP):
+            self.setWindowIcon(QIcon(self.RUTA_ICONO_APP))
 
         self.lbl_instancias = QLabel("Instancias de Servidores disponibles:")
         self.lbl_instancias.setStyleSheet("font-weight: bold; font-size: 11pt;")
@@ -51,6 +58,18 @@ class ServerLauncher(QMainWindow):
         self.btn_config_global = QPushButton("⚙️ Ajustes / Java")
         self.btn_descargar_ftb = QPushButton("🔥 Descargar FTB")
         self.btn_instalar_zip = QPushButton("📦 Instalar desde ZIP")
+        self.btn_seleccionar_playit = QPushButton("📁 Elegir playit.exe")
+        self.btn_playit = QPushButton("▶ Iniciar Playit")
+        self.lbl_estado_playit = QLabel("Playit: detenido")
+        self.chk_playit_auto = QCheckBox("Ejecutar junto al servidor")
+        self.chk_playit_auto.setChecked(self.playit_auto)
+        self.log_playit = QPlainTextEdit()
+        self.log_playit.setReadOnly(True)
+        self.log_playit.setMaximumHeight(150)
+        self.log_playit.setPlaceholderText("Aquí aparecerá la salida de Playit y el enlace de registro.")
+        self.log_playit.setStyleSheet(
+            "background-color: #151515; color: #9cdcfe; font-family: Consolas; font-size: 8pt;"
+        )
         
         estilo_botones = "QPushButton { padding: 8px; font-size: 10pt; font-weight: bold; }"
         self.btn_iniciar.setStyleSheet(estilo_botones)
@@ -58,27 +77,54 @@ class ServerLauncher(QMainWindow):
         self.btn_config_global.setStyleSheet(estilo_botones)
         self.btn_descargar_ftb.setStyleSheet(estilo_botones)
         self.btn_instalar_zip.setStyleSheet(estilo_botones)
+        self.btn_seleccionar_playit.setStyleSheet(estilo_botones)
+        self.btn_playit.setStyleSheet(estilo_botones)
 
+        grupo_servidor = QGroupBox("Servidor")
+        layout_servidor = QVBoxLayout(grupo_servidor)
+        layout_servidor.addWidget(self.btn_iniciar)
+        layout_servidor.addWidget(self.btn_config_instancia)
 
-        layout_botones = QHBoxLayout()
-        layout_botones.addWidget(self.btn_iniciar, stretch=2)
-        layout_botones.addWidget(self.btn_config_instancia, stretch=1)
-        layout_botones.addWidget(self.btn_config_global, stretch=1)
-        layout_botones.addWidget(self.btn_descargar_ftb, stretch=1)
-        layout_botones.addWidget(self.btn_instalar_zip, stretch=1)
+        grupo_instalacion = QGroupBox("Instalación")
+        layout_instalacion = QVBoxLayout(grupo_instalacion)
+        layout_instalacion.addWidget(self.btn_descargar_ftb)
+        layout_instalacion.addWidget(self.btn_instalar_zip)
+
+        grupo_playit = QGroupBox("Red pública con Playit")
+        layout_playit = QVBoxLayout(grupo_playit)
+        layout_playit.addWidget(self.lbl_estado_playit)
+        layout_playit.addWidget(self.chk_playit_auto)
+        layout_playit.addWidget(self.btn_seleccionar_playit)
+        layout_playit.addWidget(self.btn_playit)
+        layout_playit.addWidget(self.log_playit)
+
+        barra_lateral = QWidget()
+        barra_lateral.setFixedWidth(285)
+        layout_lateral = QVBoxLayout(barra_lateral)
+        layout_lateral.setContentsMargins(8, 0, 0, 0)
+        layout_lateral.addWidget(grupo_servidor)
+        layout_lateral.addWidget(grupo_instalacion)
+        layout_lateral.addWidget(grupo_playit)
+        layout_lateral.addStretch()
+        layout_lateral.addWidget(self.btn_config_global)
+
+        layout_contenido = QHBoxLayout()
+        layout_contenido.addWidget(self.lista_servidores, stretch=1)
+        layout_contenido.addWidget(barra_lateral)
 
         layout_principal = QVBoxLayout()
         layout_principal.addWidget(self.lbl_instancias)
-        layout_principal.addWidget(self.lista_servidores)
-        layout_principal.addLayout(layout_botones)
+        layout_principal.addLayout(layout_contenido)
 
         container = QWidget()
         container.setLayout(layout_principal)
         self.setCentralWidget(container)
 
         self.proceso_server = QProcess(self)
+        self.proceso_playit = QProcess(self)
         self.instancia_actual = None
         self.proceso_server.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)
+        self.proceso_playit.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)
         
         self.ventana_consola = None
 
@@ -87,10 +133,18 @@ class ServerLauncher(QMainWindow):
         self.btn_config_instancia.clicked.connect(self.abrir_configuracion_instancia)
         self.btn_descargar_ftb.clicked.connect(self.abrir_descargador_ftb)
         self.btn_instalar_zip.clicked.connect(self.abrir_instalador_zip)
+        self.btn_seleccionar_playit.clicked.connect(self.seleccionar_ejecutable_playit)
+        self.btn_playit.clicked.connect(self.controlar_playit)
+        self.chk_playit_auto.toggled.connect(self.guardar_preferencia_playit)
         self.lista_servidores.currentItemChanged.connect(self.actualizar_estado_botones)
         
         self.proceso_server.readyRead.connect(self.leer_consola)
         self.proceso_server.finished.connect(self.servidor_terminado)
+        self.proceso_server.stateChanged.connect(self.estado_servidor_cambiado)
+        self.proceso_server.errorOccurred.connect(self.error_proceso_servidor)
+        self.proceso_playit.readyRead.connect(self.leer_salida_playit)
+        self.proceso_playit.stateChanged.connect(self.actualizar_estado_playit)
+        self.proceso_playit.errorOccurred.connect(self.error_proceso_playit)
 
         # Sistema de actualización automática: Observador de la carpeta de instancias
         self.watcher = QFileSystemWatcher()
@@ -107,22 +161,107 @@ class ServerLauncher(QMainWindow):
                     data = json.load(f)
                     self.ruta_instancias = data.get("ruta_instancias", "")
                     self.ruta_javas_raiz = data.get("ruta_javas_raiz", "")
+                    self.ruta_playit = data.get("ruta_playit", "")
+                    self.playit_auto = data.get("playit_auto", True)
             except Exception: pass
         
-        if not self.ruta_instancias or not os.path.exists(self.ruta_instancias):
+        if not self.ruta_instancias or not os.path.isdir(self.ruta_instancias):
             self.ruta_instancias = os.path.join(os.path.dirname(__file__), "instancias")
-            if not os.path.exists(self.ruta_instancias): os.makedirs(self.ruta_instancias)
+        os.makedirs(self.ruta_instancias, exist_ok=True)
         
-        if not self.ruta_javas_raiz:
+        if not self.ruta_javas_raiz or not os.path.isdir(self.ruta_javas_raiz):
             self.ruta_javas_raiz = os.path.join(os.path.dirname(__file__), "javas")
-            if not os.path.exists(self.ruta_javas_raiz): os.makedirs(self.ruta_javas_raiz)
+        os.makedirs(self.ruta_javas_raiz, exist_ok=True)
                 
         self.guardar_configuracion_global()
 
     def guardar_configuracion_global(self):
-        data = {"ruta_instancias": self.ruta_instancias, "ruta_javas_raiz": self.ruta_javas_raiz}
+        data = {
+            "ruta_instancias": self.ruta_instancias,
+            "ruta_javas_raiz": self.ruta_javas_raiz,
+            "ruta_playit": self.ruta_playit,
+            "playit_auto": self.playit_auto,
+        }
         with open(self.ARCHIVO_CONFIG_GLOBAL, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=4)
+
+    def guardar_preferencia_playit(self, activado):
+        self.playit_auto = activado
+        self.guardar_configuracion_global()
+
+    def seleccionar_ejecutable_playit(self):
+        ruta_inicial = os.path.dirname(self.ruta_playit) if self.ruta_playit else ""
+        ruta, _ = QFileDialog.getOpenFileName(
+            self,
+            "Seleccionar ejecutable de Playit",
+            ruta_inicial,
+            "Playit (playit*.exe);;Ejecutables (*.exe);;Todos los archivos (*.*)",
+        )
+        if ruta:
+            self.ruta_playit = ruta
+            self.guardar_configuracion_global()
+            self.lbl_estado_playit.setText(f"Playit: listo ({os.path.basename(ruta)})")
+
+    def controlar_playit(self):
+        if self.proceso_playit.state() == QProcess.ProcessState.NotRunning:
+            self.iniciar_playit(mostrar_error=True)
+        else:
+            self.detener_playit()
+
+    def iniciar_playit(self, mostrar_error=False):
+        if self.proceso_playit.state() != QProcess.ProcessState.NotRunning:
+            return
+        if not self.ruta_playit or not os.path.isfile(self.ruta_playit):
+            mensaje = "Selecciona primero el ejecutable playit.exe."
+            self.lbl_estado_playit.setText(f"Playit: {mensaje}")
+            if mostrar_error:
+                QMessageBox.warning(self, "Playit no configurado", mensaje)
+            return
+
+        self.log_playit.clear()
+        self.log_playit.appendPlainText("[Launcher] Iniciando Playit...")
+        self.proceso_playit.setWorkingDirectory(os.path.dirname(self.ruta_playit))
+        self.proceso_playit.start(self.ruta_playit, [])
+
+    def detener_playit(self):
+        if self.proceso_playit.state() != QProcess.ProcessState.NotRunning:
+            self.log_playit.appendPlainText("[Launcher] Deteniendo Playit...")
+            self.proceso_playit.terminate()
+
+    def leer_salida_playit(self):
+        data = self.proceso_playit.readAll().data()
+        try:
+            texto = data.decode("utf-8")
+        except UnicodeDecodeError:
+            texto = data.decode("cp1252", errors="replace")
+        if texto.strip():
+            self.log_playit.appendPlainText(texto.rstrip())
+
+    def actualizar_estado_playit(self, estado):
+        ejecutando = estado != QProcess.ProcessState.NotRunning
+        self.btn_seleccionar_playit.setEnabled(not ejecutando)
+        self.btn_playit.setText("■ Detener Playit" if ejecutando else "▶ Iniciar Playit")
+        if estado == QProcess.ProcessState.Starting:
+            self.lbl_estado_playit.setText("Playit: iniciando...")
+        elif estado == QProcess.ProcessState.Running:
+            self.lbl_estado_playit.setText("Playit: conectado")
+        else:
+            self.lbl_estado_playit.setText("Playit: detenido")
+
+    def error_proceso_playit(self, error):
+        if error == QProcess.ProcessError.FailedToStart:
+            detalle = self.proceso_playit.errorString()
+            self.log_playit.appendPlainText(f"[Launcher] No se pudo iniciar Playit: {detalle}")
+            self.lbl_estado_playit.setText("Playit: error al iniciar")
+
+    def estado_servidor_cambiado(self, estado):
+        self.actualizar_estado_botones()
+        if not self.playit_auto:
+            return
+        if estado == QProcess.ProcessState.Running:
+            self.iniciar_playit(mostrar_error=False)
+        elif estado == QProcess.ProcessState.NotRunning:
+            self.detener_playit()
 
     def obtener_datos_instancia(self, ruta_servidor):
         ruta_json = os.path.join(ruta_servidor, "config_instancia.json")
@@ -272,9 +411,10 @@ class ServerLauncher(QMainWindow):
             except Exception: pass
         self.actualizar_estado_botones()
 
-    def actualizar_estado_botones(self):
+    def actualizar_estado_botones(self, *_args):
         tiene_seleccion = self.lista_servidores.currentItem() is not None
-        en_ejecucion = self.proceso_server.state() == QProcess.ProcessState.Running
+        en_ejecucion = self.proceso_server.state() != QProcess.ProcessState.NotRunning
+        self.btn_iniciar.setEnabled(tiene_seleccion or en_ejecucion)
         self.btn_config_instancia.setEnabled(tiene_seleccion and not en_ejecucion)
         self.btn_config_global.setEnabled(not en_ejecucion)
         self.btn_descargar_ftb.setEnabled(not en_ejecucion)
@@ -320,11 +460,15 @@ class ServerLauncher(QMainWindow):
     def obtener_version_de_binario(self, ruta_exe):
         p = QProcess()
         p.start(ruta_exe, ["-version"])
-        p.waitForFinished(1000)
-        output = str(p.readAllStandardError())
-        if "1.8.0" in output or '"1.8' in output: return 8
-        for v in [11, 16, 17, 18, 19, 20, 21, 22]:
-            if f'"{v}.' in output or f' {v}.' in output: return v
+        if not p.waitForFinished(3000):
+            p.kill()
+            p.waitForFinished(1000)
+            return None
+        output = bytes(p.readAllStandardError()).decode("utf-8", errors="replace")
+        output += bytes(p.readAllStandardOutput()).decode("utf-8", errors="replace")
+        match = re.search(r'version\s+"(?:1\.)?(\d+)', output, re.IGNORECASE)
+        if match:
+            return int(match.group(1))
         return None
 
     def verificar_y_aceptar_eula(self, ruta_servidor):
@@ -537,6 +681,37 @@ class ServerLauncher(QMainWindow):
         self.btn_iniciar.setText("🚀 Iniciar Servidor")
         self.instancia_actual = None
         self.actualizar_estado_botones()
+
+    def error_proceso_servidor(self, error):
+        if error != QProcess.ProcessError.FailedToStart:
+            return
+        detalle = self.proceso_server.errorString()
+        if self.ventana_consola:
+            self.ventana_consola.consola.appendPlainText(
+                f"\n[Launcher] No se pudo iniciar el proceso: {detalle}"
+            )
+        QMessageBox.critical(self, "Error al iniciar", f"No se pudo iniciar el servidor:\n{detalle}")
+        self.btn_iniciar.setText("🚀 Iniciar Servidor")
+        self.instancia_actual = None
+        self.actualizar_estado_botones()
+
+    def closeEvent(self, event):
+        if self.proceso_server.state() != QProcess.ProcessState.NotRunning:
+            QMessageBox.warning(
+                self,
+                "Servidor en ejecución",
+                "Detén el servidor y espera a que termine de guardar el mundo antes de cerrar el launcher.",
+            )
+            event.ignore()
+            return
+
+        if self.proceso_playit.state() != QProcess.ProcessState.NotRunning:
+            self.proceso_playit.terminate()
+            if not self.proceso_playit.waitForFinished(2000):
+                self.proceso_playit.kill()
+                self.proceso_playit.waitForFinished(1000)
+        super().closeEvent(event)
+
     def keyPressEvent(self, event):
         """Captura la pulsación de teclas a nivel global en la ventana principal."""
         # Si el usuario presiona la tecla F5

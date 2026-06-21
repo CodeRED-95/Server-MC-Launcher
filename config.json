@@ -1,4 +1,6 @@
 {
     "ruta_instancias": "F:/Server_Minecraft",
-    "ruta_javas_raiz": "D:/Projectos VS Code/java"
+    "ruta_javas_raiz": "D:/Projectos VS Code/java",
+    "ruta_playit": "",
+    "playit_auto": true
 }

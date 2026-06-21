@@ -123,7 +123,7 @@ class ConsoleWindow(QDialog):
                 req = urllib.request.Request(url, data=data, method='POST')
                 req.add_header('Content-Type', 'application/x-www-form-urlencoded')
 
-                with urllib.request.urlopen(req) as response:
+                with urllib.request.urlopen(req, timeout=30) as response:
                     res_data = json.loads(response.read().decode('utf-8'))
                     if res_data.get("success"):
                         log_url = res_data.get("url")
@@ -274,6 +274,7 @@ class ConfigInstanciaDialog(QDialog):
 
         self.ftb_nombre_real = ""
         self.ftb_modpack_id = ""
+        self.ftb_version_id = ""
         ruta_json = os.path.join(self.ruta_instancia, "config_instancia.json")
         if os.path.exists(ruta_json):
             try:
@@ -281,6 +282,7 @@ class ConfigInstanciaDialog(QDialog):
                     data = json.load(f)
                     self.ftb_nombre_real = data.get("ftb_nombre_real", "")
                     self.ftb_modpack_id = data.get("ftb_modpack_id", "")
+                    self.ftb_version_id = data.get("ftb_version_id", "")
             except Exception: pass
 
         # Si no hay datos en el JSON, intentamos recuperarlos del LOG del instalador
@@ -407,7 +409,7 @@ class ConfigInstanciaDialog(QDialog):
         except: return ""
 
     def preparar_actualizacion(self):
-        version_actual = self.parsear_version_log()
+        version_actual = self.ftb_version_id or self.parsear_version_log()
         self.solicitar_actualizacion.emit(self.ftb_nombre_real, str(self.ftb_modpack_id), version_actual)
 
     def seleccionar_archivo(self):
@@ -654,25 +656,22 @@ class FTBDownloaderDialog(QDialog):
         item = self.lista_resultados.currentItem()
         if not item: return
         detalles = item.data(Qt.ItemDataRole.UserRole)
-        versiones = detalles.get("versions", [])
+        versiones = list(detalles.get("versions", []))
         
         # Si estamos actualizando, filtramos para mostrar solo versiones posteriores
         if self.version_id_actual:
             try:
                 v_id_actual = int(self.version_id_actual)
-                idx_actual = -1
-                for i, v in enumerate(versiones):
-                    if v.get('id') == v_id_actual:
-                        idx_actual = i
-                        break
-                
-                if idx_actual != -1:
-                    # Las versiones posteriores (más nuevas) están después de la actual en la lista.
-                    versiones = versiones[idx_actual + 1:]
-                    # Revertimos para que la más reciente aparezca primero en el selector
-                    versiones.reverse()
-                    self.lbl_version.setText(f"Nuevas versiones (ID actual: {v_id_actual}):")
+                versiones = [
+                    version for version in versiones
+                    if int(version.get("id", 0)) > v_id_actual
+                ]
+                self.lbl_version.setText(f"Nuevas versiones (ID actual: {v_id_actual}):")
             except: pass
+
+        # Los IDs de FTB crecen con cada publicación. Ordenar siempre en descendente
+        # garantiza que la versión más reciente sea la opción seleccionada por defecto.
+        versiones.sort(key=lambda version: int(version.get("id", 0)), reverse=True)
 
         if not versiones:
             if self.version_id_actual: self.lbl_estado.setText("Ya tienes la versión más reciente instalada.")
@@ -680,6 +679,7 @@ class FTBDownloaderDialog(QDialog):
         else:
             for v in versiones:
                 self.combo_versiones.addItem(f"Versión: {v.get('name')}", v)
+            self.combo_versiones.setCurrentIndex(0)
             self.btn_instalar.setEnabled(True)
 
     def iniciar_descarga_ftb(self):
@@ -734,7 +734,8 @@ class FTBDownloaderDialog(QDialog):
         self.worker.estado.connect(self.lbl_estado.setText)
         self.worker.estado.connect(self.log_instalacion.appendPlainText)
         self.worker.finalizado.connect(lambda exito, msg: self.instalacion_ftb_finalizada(
-            exito, msg, ruta_instancia_destino, nombre_carpeta_final, modpack_detalles, id_modpack
+            exito, msg, ruta_instancia_destino, nombre_carpeta_final,
+            modpack_detalles, id_modpack, id_version
         ))
         self.worker.start()
 
@@ -745,7 +746,8 @@ class FTBDownloaderDialog(QDialog):
             self.input_interaccion.clear()
             self.log_instalacion.appendPlainText(f"> Enviado al instalador: {comando}")
 
-    def instalacion_ftb_finalizada(self, exito, mensaje, ruta_instancia, nombre_instancia, modpack_detalles, id_modpack):
+    def instalacion_ftb_finalizada(self, exito, mensaje, ruta_instancia, nombre_instancia,
+                                   modpack_detalles, id_modpack, id_version):
         self.btn_instalar.setEnabled(True)
         self.btn_buscar.setEnabled(True)
         self.barra_progreso.setValue(100 if exito else 0)
@@ -755,13 +757,25 @@ class FTBDownloaderDialog(QDialog):
             if not os.path.exists(os.path.join(ruta_instancia, "start.bat")):
                 archivo_arranque = "run.bat" if os.path.exists(os.path.join(ruta_instancia, "run.bat")) else "server.jar"
 
-            config_data = {
+            config_path = os.path.join(ruta_instancia, "config_instancia.json")
+            config_data = {}
+            if os.path.exists(config_path):
+                try:
+                    with open(config_path, "r", encoding="utf-8") as f:
+                        config_data = json.load(f)
+                    if not isinstance(config_data, dict):
+                        config_data = {}
+                except (OSError, json.JSONDecodeError):
+                    config_data = {}
+
+            config_data.update({
                 "archivo_arranque": archivo_arranque, 
-                "java_especifico": "AUTO",
+                "java_especifico": config_data.get("java_especifico", "AUTO"),
                 "ftb_nombre_real": modpack_detalles.get("name", ""),
-                "ftb_modpack_id": id_modpack
-            }
-            with open(os.path.join(ruta_instancia, "config_instancia.json"), "w", encoding="utf-8") as f:
+                "ftb_modpack_id": id_modpack,
+                "ftb_version_id": id_version,
+            })
+            with open(config_path, "w", encoding="utf-8") as f:
                 json.dump(config_data, f, indent=4)
 
             tipo_msg = "actualizada" if self.ruta_update else "creada"
@@ -842,6 +856,7 @@ class ZipInstallerDialog(QDialog):
             if confirm == QMessageBox.StandardButton.No: return
 
         self.btn_instalar.setEnabled(False)
+        self.btn_cancelar.setEnabled(False)
         self.txt_instance_name.setReadOnly(True)
         
         self.worker = ZipExtractionWorker(self.zip_path, self.instance_name, self.destination_root_path, es_update=bool(self.ruta_update))
@@ -852,6 +867,7 @@ class ZipInstallerDialog(QDialog):
 
     def instalacion_zip_finalizada(self, success, message, instance_path):
         self.btn_instalar.setEnabled(True)
+        self.btn_cancelar.setEnabled(True)
         self.txt_instance_name.setReadOnly(False)
         if success:
             self.accept()

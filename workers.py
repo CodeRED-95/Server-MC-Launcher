@@ -6,7 +6,45 @@ import re
 import time
 import urllib.request
 import subprocess
+import shutil
 from PyQt6.QtCore import QThread, pyqtSignal
+
+
+def _extraer_zip_seguro(zip_ref, destino, callback_progreso=None):
+    """Extrae un ZIP impidiendo que una entrada escriba fuera del destino."""
+    destino_real = os.path.abspath(destino)
+    entradas = zip_ref.infolist()
+    total = len(entradas)
+    if not total:
+        raise ValueError("El ZIP está vacío.")
+
+    for entrada in entradas:
+        ruta_destino = os.path.abspath(os.path.join(destino_real, entrada.filename))
+        try:
+            dentro_del_destino = os.path.commonpath([destino_real, ruta_destino]) == destino_real
+        except ValueError:
+            dentro_del_destino = False
+
+        if not dentro_del_destino:
+            raise ValueError(f"El ZIP contiene una ruta no segura: {entrada.filename}")
+
+    for indice, entrada in enumerate(entradas, start=1):
+        zip_ref.extract(entrada, destino_real)
+        if callback_progreso and total:
+            callback_progreso(indice, total)
+
+
+def _detectar_archivo_arranque(ruta_instancia):
+    candidatos = ("startserver.bat", "start.bat", "run.bat", "server.jar")
+    for candidato in candidatos:
+        if os.path.isfile(os.path.join(ruta_instancia, candidato)):
+            return candidato
+
+    for nombre in sorted(os.listdir(ruta_instancia)):
+        if nombre.lower().endswith((".bat", ".jar")):
+            return nombre
+    return ""
+
 
 class DownloaderWorker(QThread):
     progreso = pyqtSignal(int)
@@ -27,7 +65,7 @@ class DownloaderWorker(QThread):
             req = urllib.request.Request(self.url, headers={
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
             })
-            with urllib.request.urlopen(req) as respuesta:
+            with urllib.request.urlopen(req, timeout=60) as respuesta:
                 total_size = respuesta.getheader('Content-Length')
                 total_size = int(total_size) if total_size else None
                 bytes_descargados = 0
@@ -48,7 +86,7 @@ class DownloaderWorker(QThread):
 
             if zipfile.is_zipfile(self.destino_zip):
                 with zipfile.ZipFile(self.destino_zip, 'r') as zip_ref:
-                    zip_ref.extractall(self.carpeta_extraccion)
+                    _extraer_zip_seguro(zip_ref, self.carpeta_extraccion)
             else:
                 raise Exception("El archivo descargado no es un paquete ZIP válido.")
 
@@ -77,38 +115,44 @@ class ZipExtractionWorker(QThread):
         self.es_update = es_update
 
     def run(self):
+        carpeta_creada = False
         try:
             if not self.es_update and os.path.exists(self.instance_path):
                 self.finalizado.emit(False, f"La carpeta '{self.instance_name}' ya existe.", "")
                 return
 
+            config_data = {"archivo_arranque": "", "java_especifico": "AUTO"}
+            ruta_json = os.path.join(self.instance_path, "config_instancia.json")
+            if self.es_update and os.path.exists(ruta_json):
+                try:
+                    with open(ruta_json, "r", encoding="utf-8") as f:
+                        data_existente = json.load(f)
+                    if isinstance(data_existente, dict):
+                        config_data = data_existente
+                except (OSError, json.JSONDecodeError):
+                    pass
+
             if not os.path.exists(self.instance_path):
                 os.makedirs(self.instance_path)
+                carpeta_creada = True
 
             self.estado.emit(f"Descomprimiendo '{os.path.basename(self.zip_path)}' en '{self.instance_name}'...")
             self.progreso.emit(0)
 
             with zipfile.ZipFile(self.zip_path, 'r') as zip_ref:
-                file_list = zip_ref.namelist()
-                total_files = len(file_list)
-                
-                for i, file in enumerate(file_list):
-                    zip_ref.extract(file, self.instance_path)
-                    porcentaje = int((i / total_files) * 90)
-                    self.progreso.emit(porcentaje)
+                _extraer_zip_seguro(
+                    zip_ref,
+                    self.instance_path,
+                    lambda procesados, total: self.progreso.emit(int(procesados / total * 90)),
+                )
 
             # Crear o actualizar config_instancia.json
-            ruta_json = os.path.join(self.instance_path, "config_instancia.json")
-            config_data = {"archivo_arranque": "startserver.bat", "java_especifico": "AUTO"}
-
-            if self.es_update and os.path.exists(ruta_json):
-                try:
-                    with open(ruta_json, "r", encoding="utf-8") as f:
-                        data_existente = json.load(f)
-                        # Forzamos el regreso a startserver.bat preservando el resto (Java, IDs, etc)
-                        data_existente["archivo_arranque"] = "startserver.bat"
-                        config_data = data_existente
-                except Exception: pass
+            archivo_detectado = _detectar_archivo_arranque(self.instance_path)
+            if not archivo_detectado:
+                raise FileNotFoundError(
+                    "No se encontró un archivo de arranque .bat o .jar en la raíz del ZIP."
+                )
+            config_data["archivo_arranque"] = archivo_detectado
 
             with open(ruta_json, "w", encoding="utf-8") as f:
                 json.dump(config_data, f, indent=4)
@@ -116,6 +160,11 @@ class ZipExtractionWorker(QThread):
             self.progreso.emit(100)
             self.finalizado.emit(True, "Servidor ZIP instalado correctamente.", self.instance_path)
         except Exception as e:
+            if carpeta_creada:
+                try:
+                    shutil.rmtree(self.instance_path)
+                except OSError:
+                    pass
             self.finalizado.emit(False, f"Error al instalar desde ZIP: {e}", "")
 
 
@@ -150,7 +199,7 @@ class FTBDownloadWorker(QThread):
             req = urllib.request.Request(self.url_instalador, headers={
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
             })
-            with urllib.request.urlopen(req) as response:
+            with urllib.request.urlopen(req, timeout=60) as response:
                 with open(ruta_instalador_exe, 'wb') as out_file:
                     while True:
                         chunk = response.read(1024 * 64)
