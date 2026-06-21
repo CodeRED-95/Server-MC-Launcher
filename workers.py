@@ -7,7 +7,89 @@ import time
 import urllib.request
 import subprocess
 import shutil
+import hashlib
 from PyQt6.QtCore import QThread, pyqtSignal
+
+
+class PlayitDownloadWorker(QThread):
+    progreso = pyqtSignal(int)
+    estado = pyqtSignal(str)
+    finalizado = pyqtSignal(bool, str, str)
+
+    # 1.x distribuye solo el daemon portable y necesita un frontend IPC separado.
+    # 0.17.1 sigue soportada oficialmente y conserva el flujo interactivo de claim.
+    DOWNLOAD_URL = (
+        "https://github.com/playit-cloud/playit-agent/releases/download/"
+        "v0.17.1/playit-windows-x86_64-signed.exe"
+    )
+    EXPECTED_SHA256 = "9b00d6ff7d37d1052e5ae097e1348e11deae8617cd7a8ba39d1777f2006316a3"
+
+    def __init__(self, ruta_destino):
+        super().__init__()
+        self.ruta_destino = ruta_destino
+
+    def run(self):
+        ruta_temporal = self.ruta_destino + ".part"
+        try:
+            if os.path.isfile(self.ruta_destino):
+                sha_actual = hashlib.sha256()
+                with open(self.ruta_destino, "rb") as archivo:
+                    for bloque in iter(lambda: archivo.read(1024 * 1024), b""):
+                        sha_actual.update(bloque)
+                if sha_actual.hexdigest().lower() == self.EXPECTED_SHA256:
+                    self.progreso.emit(100)
+                    self.finalizado.emit(
+                        True, "Playit ya está instalado y verificado.", self.ruta_destino
+                    )
+                    return
+
+            os.makedirs(os.path.dirname(self.ruta_destino), exist_ok=True)
+            ultimo_error = None
+            for intento in range(1, 5):
+                try:
+                    self.estado.emit(f"Playit: descargando agente oficial (intento {intento}/4)...")
+                    req = urllib.request.Request(
+                        self.DOWNLOAD_URL,
+                        headers={"User-Agent": "Server-MC-Launcher"},
+                    )
+                    with urllib.request.urlopen(req, timeout=90) as respuesta, open(ruta_temporal, "wb") as archivo:
+                        total = int(respuesta.headers.get("Content-Length", 0))
+                        descargado = 0
+                        while True:
+                            bloque = respuesta.read(64 * 1024)
+                            if not bloque:
+                                break
+                            archivo.write(bloque)
+                            descargado += len(bloque)
+                            if total:
+                                self.progreso.emit(int(descargado / total * 100))
+                    ultimo_error = None
+                    break
+                except Exception as error:
+                    ultimo_error = error
+                    if os.path.exists(ruta_temporal):
+                        os.remove(ruta_temporal)
+                    time.sleep(intento * 2)
+            if ultimo_error:
+                raise ultimo_error
+
+            sha256 = hashlib.sha256()
+            with open(ruta_temporal, "rb") as archivo:
+                for bloque in iter(lambda: archivo.read(1024 * 1024), b""):
+                    sha256.update(bloque)
+            if sha256.hexdigest().lower() != self.EXPECTED_SHA256:
+                raise RuntimeError("La verificación SHA-256 del ejecutable de Playit falló.")
+
+            os.replace(ruta_temporal, self.ruta_destino)
+            self.progreso.emit(100)
+            self.finalizado.emit(True, "Playit se instaló correctamente dentro del launcher.", self.ruta_destino)
+        except Exception as error:
+            if os.path.exists(ruta_temporal):
+                try:
+                    os.remove(ruta_temporal)
+                except OSError:
+                    pass
+            self.finalizado.emit(False, str(error), "")
 
 
 def _extraer_zip_seguro(zip_ref, destino, callback_progreso=None):

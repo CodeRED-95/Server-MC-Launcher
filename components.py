@@ -8,11 +8,13 @@ import urllib.request
 import urllib.parse
 import urllib.error
 import webbrowser
+import zipfile
 from PyQt6.QtWidgets import (QDialog, QPlainTextEdit, QLineEdit, QPushButton, 
                              QHBoxLayout, QVBoxLayout, QLabel, QComboBox, 
-                             QProgressBar, QMessageBox, QFileDialog, QListWidget, QListWidgetItem)
-from PyQt6.QtCore import Qt, pyqtSignal, QRegularExpression
-from PyQt6.QtGui import QSyntaxHighlighter, QTextCharFormat, QColor, QIcon
+                              QProgressBar, QMessageBox, QFileDialog, QListWidget, QListWidgetItem)
+from PyQt6.QtWidgets import QGroupBox
+from PyQt6.QtCore import Qt, pyqtSignal, QRegularExpression, QUrl
+from PyQt6.QtGui import QSyntaxHighlighter, QTextCharFormat, QColor, QIcon, QDesktopServices
 from workers import DownloaderWorker, FTBDownloadWorker, ZipExtractionWorker
 
 class LogHighlighter(QSyntaxHighlighter):
@@ -264,7 +266,8 @@ class ConfigInstanciaDialog(QDialog):
     solicitar_actualizacion = pyqtSignal(str, str, str) # nombre, modpack_id, version_id
     solicitar_actualizacion_zip = pyqtSignal()
 
-    def __init__(self, nombre_instancia, ruta_instancia, archivo_actual, java_actual, ruta_javas_raiz, parent=None):
+    def __init__(self, nombre_instancia, ruta_instancia, archivo_actual, java_actual,
+                 ruta_javas_raiz, grupos_disponibles=None, parent=None):
         super().__init__(parent)
         self.nombre_instancia = nombre_instancia
         self.ruta_instancia = ruta_instancia
@@ -275,6 +278,7 @@ class ConfigInstanciaDialog(QDialog):
         self.ftb_nombre_real = ""
         self.ftb_modpack_id = ""
         self.ftb_version_id = ""
+        self.grupo_instancia = "No agrupado"
         ruta_json = os.path.join(self.ruta_instancia, "config_instancia.json")
         if os.path.exists(ruta_json):
             try:
@@ -283,6 +287,7 @@ class ConfigInstanciaDialog(QDialog):
                     self.ftb_nombre_real = data.get("ftb_nombre_real", "")
                     self.ftb_modpack_id = data.get("ftb_modpack_id", "")
                     self.ftb_version_id = data.get("ftb_version_id", "")
+                    self.grupo_instancia = data.get("grupo", "No agrupado") or "No agrupado"
             except Exception: pass
 
         # Si no hay datos en el JSON, intentamos recuperarlos del LOG del instalador
@@ -290,7 +295,7 @@ class ConfigInstanciaDialog(QDialog):
             self.intentar_recuperar_metadatos_log()
 
         self.setWindowTitle(f"Configurar Instancia: {nombre_instancia}")
-        self.resize(600, 360)
+        self.resize(720, 680)
 
         self.lbl_nombre = QLabel("Nombre de la instancia (Carpeta):")
         self.txt_nombre = QLineEdit(self.nombre_instancia)
@@ -304,6 +309,13 @@ class ConfigInstanciaDialog(QDialog):
         self.lbl_java = QLabel("Asignación de Java para esta instancia:")
         self.combo_java = QComboBox()
 
+        self.lbl_grupo = QLabel("Grupo de la instancia:")
+        self.combo_grupo = QComboBox()
+        self.combo_grupo.setEditable(True)
+        grupos = sorted(set(grupos_disponibles or []) | {"No agrupado", self.grupo_instancia})
+        self.combo_grupo.addItems(grupos)
+        self.combo_grupo.setCurrentText(self.grupo_instancia)
+
         self.lbl_icon = QLabel("Icono personalizado de la instancia (Opcional - Imagen PNG/JPG):")
         self.txt_icon = QLineEdit()
         self.txt_icon.setReadOnly(True)
@@ -312,6 +324,21 @@ class ConfigInstanciaDialog(QDialog):
         ruta_icon_json = os.path.join(self.ruta_instancia, "icon.png")
         if os.path.exists(ruta_icon_json):
             self.txt_icon.setText("icon.png (Personalizado Detectado)")
+
+        self.grupo_mods = QGroupBox("Mods instalados")
+        self.lbl_cantidad_mods = QLabel()
+        self.lista_mods = QListWidget()
+        self.lista_mods.setMinimumHeight(130)
+        self.btn_abrir_instancia = QPushButton("📂 Abrir carpeta de la instancia")
+        self.btn_abrir_mods = QPushButton("🧩 Abrir carpeta de mods")
+        layout_carpetas = QHBoxLayout()
+        layout_carpetas.addWidget(self.btn_abrir_instancia)
+        layout_carpetas.addWidget(self.btn_abrir_mods)
+        layout_mods = QVBoxLayout(self.grupo_mods)
+        layout_mods.addWidget(self.lbl_cantidad_mods)
+        layout_mods.addWidget(self.lista_mods)
+        layout_mods.addLayout(layout_carpetas)
+        self.cargar_lista_mods()
 
         self.btn_actualizar = QPushButton("🔄 Actualizar Modpack")
         self.btn_actualizar.setEnabled(bool(self.ftb_modpack_id))
@@ -364,12 +391,23 @@ class ConfigInstanciaDialog(QDialog):
         layout_principal.addSpacing(10)
         layout_principal.addWidget(self.lbl_java)
         layout_principal.addWidget(self.combo_java)
+        layout_principal.addSpacing(10)
+        layout_principal.addWidget(self.lbl_grupo)
+        layout_principal.addWidget(self.combo_grupo)
+        layout_principal.addSpacing(10)
+        layout_principal.addWidget(self.grupo_mods)
         layout_principal.addSpacing(20)
         layout_principal.addLayout(layout_botones)
         self.setLayout(layout_principal)
 
         self.btn_buscar_archivo.clicked.connect(self.seleccionar_archivo)
         self.btn_buscar_icon.clicked.connect(self.seleccionar_icono)
+        self.btn_abrir_instancia.clicked.connect(
+            lambda: self.abrir_carpeta(self.ruta_instancia)
+        )
+        self.btn_abrir_mods.clicked.connect(
+            lambda: self.abrir_carpeta(os.path.join(self.ruta_instancia, "mods"), crear=True)
+        )
         self.btn_eliminar.clicked.connect(self.eliminar_instancia_con_confirmacion)
         self.btn_actualizar.clicked.connect(self.preparar_actualizacion)
         self.btn_actualizar_zip.clicked.connect(self.solicitar_actualizacion_zip.emit)
@@ -377,6 +415,62 @@ class ConfigInstanciaDialog(QDialog):
         self.btn_cancelar.clicked.connect(self.reject)
 
         self.cargar_combo_javas()
+
+    def cargar_lista_mods(self):
+        self.lista_mods.clear()
+        ruta_mods = os.path.join(self.ruta_instancia, "mods")
+        mods = []
+        if os.path.isdir(ruta_mods):
+            for archivo in sorted(os.listdir(ruta_mods), key=str.lower):
+                if archivo.lower().endswith((".jar", ".jar.disabled")):
+                    mods.append(self.leer_info_mod(os.path.join(ruta_mods, archivo), archivo))
+        for nombre, version, archivo in mods:
+            texto = nombre
+            if version:
+                texto += f"  —  {version}"
+            texto += f"  [{archivo}]"
+            self.lista_mods.addItem(texto)
+        self.lbl_cantidad_mods.setText(f"{len(mods)} mod(s) encontrado(s)")
+        if not mods:
+            self.lista_mods.addItem("Esta instancia no contiene mods.")
+
+    def leer_info_mod(self, ruta, nombre_archivo):
+        nombre = os.path.splitext(os.path.splitext(nombre_archivo)[0])[0]
+        version = ""
+        try:
+            with zipfile.ZipFile(ruta) as jar:
+                if "fabric.mod.json" in jar.namelist():
+                    data = json.loads(jar.read("fabric.mod.json").decode("utf-8"))
+                    return data.get("name") or data.get("id") or nombre, str(data.get("version", "")), nombre_archivo
+
+                metadata = next(
+                    (ruta_meta for ruta_meta in (
+                        "META-INF/neoforge.mods.toml", "META-INF/mods.toml"
+                    ) if ruta_meta in jar.namelist()),
+                    None,
+                )
+                if metadata:
+                    contenido = jar.read(metadata).decode("utf-8", errors="replace")
+                    match_nombre = re.search(r'^\s*displayName\s*=\s*["\'](.+?)["\']', contenido, re.MULTILINE)
+                    match_version = re.search(r'^\s*version\s*=\s*["\'](.+?)["\']', contenido, re.MULTILINE)
+                    if match_nombre:
+                        nombre = match_nombre.group(1)
+                    if match_version and "${" not in match_version.group(1):
+                        version = match_version.group(1)
+        except (OSError, zipfile.BadZipFile, json.JSONDecodeError):
+            pass
+        return nombre, version, nombre_archivo
+
+    def abrir_carpeta(self, ruta, crear=False):
+        try:
+            if crear:
+                os.makedirs(ruta, exist_ok=True)
+            if not os.path.isdir(ruta):
+                QMessageBox.warning(self, "Carpeta no encontrada", f"No existe la carpeta:\n{ruta}")
+                return
+            QDesktopServices.openUrl(QUrl.fromLocalFile(ruta))
+        except OSError as error:
+            QMessageBox.critical(self, "No se pudo abrir la carpeta", str(error))
 
     def intentar_recuperar_metadatos_log(self):
         """Analiza el archivo log de FTB para recuperar el nombre e ID del modpack."""
@@ -508,6 +602,7 @@ class ConfigInstanciaDialog(QDialog):
                 QMessageBox.critical(self, "Error", f"No se pudo renombrar la carpeta de la instancia:\n{e}")
                 return
         
+        self.grupo_instancia = self.combo_grupo.currentText().strip() or "No agrupado"
         super().accept()
 
 

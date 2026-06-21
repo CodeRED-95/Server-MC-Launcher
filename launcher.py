@@ -6,13 +6,17 @@ import zipfile
 import ctypes
 import re
 from PyQt6.QtWidgets import (QMainWindow, QPushButton, QVBoxLayout, QHBoxLayout,
-                             QWidget, QListWidget, QListWidgetItem, QLabel, 
+                             QWidget, QLabel,
                              QDialog, QMessageBox, QFileDialog, QGroupBox,
-                             QCheckBox, QPlainTextEdit)
-from PyQt6.QtCore import QProcess, QProcessEnvironment, Qt, QSize, QFileSystemWatcher
+                             QCheckBox, QPlainTextEdit, QProgressBar, QInputDialog,
+                             QComboBox, QApplication)
+from PyQt6.QtCore import QProcess, QProcessEnvironment, Qt, QFileSystemWatcher
 from PyQt6.QtGui import QIcon
 
 from components import ConsoleWindow, ConfigGlobalDialog, ConfigInstanciaDialog, FTBDownloaderDialog, ZipInstallerDialog
+from server_grid import GroupedServerGrid
+from workers import PlayitDownloadWorker
+from instance_creator import CreateServerDialog
 
 class ServerLauncher(QMainWindow):
     def __init__(self):
@@ -22,45 +26,40 @@ class ServerLauncher(QMainWindow):
 
         self.ARCHIVO_CONFIG_GLOBAL = os.path.join(os.path.dirname(__file__), "config.json")
         self.RUTA_ICONO_APP = os.path.join(os.path.dirname(__file__), "assets", "app_icon.png")
+        self.RUTA_PLAYIT_INTERNO = os.path.join(os.path.dirname(__file__), "tools", "playit", "playit.exe")
         self.ruta_instancias = ""
         self.ruta_javas_raiz = ""
         self.ruta_playit = ""
         self.playit_auto = True
+        self.tema = "oscuro"
         
         self.cargar_configuracion_global()
+        if os.path.isfile(self.RUTA_PLAYIT_INTERNO) and not os.path.isfile(self.ruta_playit):
+            self.ruta_playit = self.RUTA_PLAYIT_INTERNO
+            self.guardar_configuracion_global()
         if os.path.exists(self.RUTA_ICONO_APP):
             self.setWindowIcon(QIcon(self.RUTA_ICONO_APP))
 
         self.lbl_instancias = QLabel("Instancias de Servidores disponibles:")
         self.lbl_instancias.setStyleSheet("font-weight: bold; font-size: 11pt;")
         
-        self.lista_servidores = QListWidget()
-        self.lista_servidores.setViewMode(QListWidget.ViewMode.IconMode)
-        self.lista_servidores.setIconSize(QSize(70, 70))
-        self.lista_servidores.setResizeMode(QListWidget.ResizeMode.Adjust)
-        self.lista_servidores.setMovement(QListWidget.Movement.Static)
-        self.lista_servidores.setSpacing(15)
-        self.lista_servidores.setStyleSheet("""
-            QListWidget {
-                background-color: #1e1e1e; color: #ffffff;
-                border: 1px solid #2d2d2d; border-radius: 6px; padding: 10px;
-            }
-            QListWidget::item {
-                background-color: #2a2a2a; border-radius: 8px;
-                padding: 8px; width: 110px; height: 120px;
-            }
-            QListWidget::item:selected { background-color: #007acc; color: white; }
-            QListWidget::item:hover { background-color: #3a3a3a; }
-        """)
+        self.lista_servidores = GroupedServerGrid()
         
         self.btn_iniciar = QPushButton("🚀 Iniciar Servidor")
+        self.btn_agregar_instancia = QPushButton("➕ Añadir Instancia")
         self.btn_config_instancia = QPushButton("🛠️ Configurar Instancia")
+        self.btn_agrupar_instancia = QPushButton("🏷 Agrupar / Mover")
         self.btn_config_global = QPushButton("⚙️ Ajustes / Java")
         self.btn_descargar_ftb = QPushButton("🔥 Descargar FTB")
         self.btn_instalar_zip = QPushButton("📦 Instalar desde ZIP")
         self.btn_seleccionar_playit = QPushButton("📁 Elegir playit.exe")
+        self.btn_instalar_playit = QPushButton("⬇ Instalar / Actualizar Playit")
         self.btn_playit = QPushButton("▶ Iniciar Playit")
         self.lbl_estado_playit = QLabel("Playit: detenido")
+        self.lbl_claim_playit = QLabel()
+        self.lbl_claim_playit.setOpenExternalLinks(True)
+        self.lbl_claim_playit.setTextInteractionFlags(Qt.TextInteractionFlag.TextBrowserInteraction)
+        self.lbl_claim_playit.setVisible(False)
         self.chk_playit_auto = QCheckBox("Ejecutar junto al servidor")
         self.chk_playit_auto.setChecked(self.playit_auto)
         self.log_playit = QPlainTextEdit()
@@ -70,20 +69,36 @@ class ServerLauncher(QMainWindow):
         self.log_playit.setStyleSheet(
             "background-color: #151515; color: #9cdcfe; font-family: Consolas; font-size: 8pt;"
         )
+        self.progreso_playit = QProgressBar()
+        self.progreso_playit.setValue(0)
+        self.progreso_playit.setVisible(False)
+        self.worker_playit = None
+        self.detencion_playit_solicitada = False
+
+        self.combo_tema = QComboBox()
+        self.combo_tema.addItem("🌙 Tema oscuro", "oscuro")
+        self.combo_tema.addItem("☀ Tema claro", "claro")
+        indice_tema = self.combo_tema.findData(self.tema)
+        self.combo_tema.setCurrentIndex(max(0, indice_tema))
         
         estilo_botones = "QPushButton { padding: 8px; font-size: 10pt; font-weight: bold; }"
         self.btn_iniciar.setStyleSheet(estilo_botones)
+        self.btn_agregar_instancia.setStyleSheet(estilo_botones)
         self.btn_config_instancia.setStyleSheet(estilo_botones)
+        self.btn_agrupar_instancia.setStyleSheet(estilo_botones)
         self.btn_config_global.setStyleSheet(estilo_botones)
         self.btn_descargar_ftb.setStyleSheet(estilo_botones)
         self.btn_instalar_zip.setStyleSheet(estilo_botones)
         self.btn_seleccionar_playit.setStyleSheet(estilo_botones)
+        self.btn_instalar_playit.setStyleSheet(estilo_botones)
         self.btn_playit.setStyleSheet(estilo_botones)
 
         grupo_servidor = QGroupBox("Servidor")
         layout_servidor = QVBoxLayout(grupo_servidor)
+        layout_servidor.addWidget(self.btn_agregar_instancia)
         layout_servidor.addWidget(self.btn_iniciar)
         layout_servidor.addWidget(self.btn_config_instancia)
+        layout_servidor.addWidget(self.btn_agrupar_instancia)
 
         grupo_instalacion = QGroupBox("Instalación")
         layout_instalacion = QVBoxLayout(grupo_instalacion)
@@ -93,9 +108,12 @@ class ServerLauncher(QMainWindow):
         grupo_playit = QGroupBox("Red pública con Playit")
         layout_playit = QVBoxLayout(grupo_playit)
         layout_playit.addWidget(self.lbl_estado_playit)
+        layout_playit.addWidget(self.lbl_claim_playit)
         layout_playit.addWidget(self.chk_playit_auto)
+        layout_playit.addWidget(self.btn_instalar_playit)
         layout_playit.addWidget(self.btn_seleccionar_playit)
         layout_playit.addWidget(self.btn_playit)
+        layout_playit.addWidget(self.progreso_playit)
         layout_playit.addWidget(self.log_playit)
 
         barra_lateral = QWidget()
@@ -106,6 +124,8 @@ class ServerLauncher(QMainWindow):
         layout_lateral.addWidget(grupo_instalacion)
         layout_lateral.addWidget(grupo_playit)
         layout_lateral.addStretch()
+        layout_lateral.addWidget(QLabel("Apariencia:"))
+        layout_lateral.addWidget(self.combo_tema)
         layout_lateral.addWidget(self.btn_config_global)
 
         layout_contenido = QHBoxLayout()
@@ -129,13 +149,17 @@ class ServerLauncher(QMainWindow):
         self.ventana_consola = None
 
         self.btn_iniciar.clicked.connect(self.controlar_servidor)
+        self.btn_agregar_instancia.clicked.connect(self.abrir_creador_instancia)
         self.btn_config_global.clicked.connect(self.abrir_configuracion_global)
         self.btn_config_instancia.clicked.connect(self.abrir_configuracion_instancia)
+        self.btn_agrupar_instancia.clicked.connect(self.agrupar_instancia)
         self.btn_descargar_ftb.clicked.connect(self.abrir_descargador_ftb)
         self.btn_instalar_zip.clicked.connect(self.abrir_instalador_zip)
         self.btn_seleccionar_playit.clicked.connect(self.seleccionar_ejecutable_playit)
+        self.btn_instalar_playit.clicked.connect(self.instalar_playit)
         self.btn_playit.clicked.connect(self.controlar_playit)
         self.chk_playit_auto.toggled.connect(self.guardar_preferencia_playit)
+        self.combo_tema.currentIndexChanged.connect(self.cambiar_tema)
         self.lista_servidores.currentItemChanged.connect(self.actualizar_estado_botones)
         
         self.proceso_server.readyRead.connect(self.leer_consola)
@@ -152,6 +176,7 @@ class ServerLauncher(QMainWindow):
             self.watcher.addPath(self.ruta_instancias)
         self.watcher.directoryChanged.connect(self.cargar_instancias)
 
+        self.aplicar_tema(self.tema)
         self.cargar_instancias()
 
     def cargar_configuracion_global(self):
@@ -163,6 +188,7 @@ class ServerLauncher(QMainWindow):
                     self.ruta_javas_raiz = data.get("ruta_javas_raiz", "")
                     self.ruta_playit = data.get("ruta_playit", "")
                     self.playit_auto = data.get("playit_auto", True)
+                    self.tema = data.get("tema", "oscuro")
             except Exception: pass
         
         if not self.ruta_instancias or not os.path.isdir(self.ruta_instancias):
@@ -181,6 +207,7 @@ class ServerLauncher(QMainWindow):
             "ruta_javas_raiz": self.ruta_javas_raiz,
             "ruta_playit": self.ruta_playit,
             "playit_auto": self.playit_auto,
+            "tema": self.tema,
         }
         with open(self.ARCHIVO_CONFIG_GLOBAL, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=4)
@@ -188,6 +215,50 @@ class ServerLauncher(QMainWindow):
     def guardar_preferencia_playit(self, activado):
         self.playit_auto = activado
         self.guardar_configuracion_global()
+
+    def cambiar_tema(self):
+        self.tema = self.combo_tema.currentData() or "oscuro"
+        self.aplicar_tema(self.tema)
+        self.guardar_configuracion_global()
+
+    def aplicar_tema(self, tema):
+        if tema == "claro":
+            estilo = """
+                QWidget { background-color: #f4f6f8; color: #1f2937; }
+                QMainWindow, QDialog { background-color: #eef2f6; }
+                QGroupBox { border: 1px solid #b8c2cf; border-radius: 7px; margin-top: 10px; padding-top: 8px; font-weight: bold; }
+                QGroupBox::title { subcontrol-origin: margin; left: 10px; padding: 0 5px; }
+                QPushButton { background-color: #ffffff; border: 1px solid #b8c2cf; border-radius: 6px; padding: 8px; }
+                QPushButton:hover { background-color: #e2e8f0; border-color: #2563eb; }
+                QPushButton:pressed { background-color: #cbd5e1; }
+                QPushButton:disabled { color: #94a3b8; background-color: #e5e7eb; }
+                QLineEdit, QComboBox, QPlainTextEdit { background-color: #ffffff; color: #111827; border: 1px solid #b8c2cf; border-radius: 5px; padding: 5px; }
+                QProgressBar { border: 1px solid #b8c2cf; border-radius: 4px; text-align: center; background: #ffffff; }
+                QProgressBar::chunk { background-color: #2563eb; border-radius: 3px; }
+            """
+        else:
+            estilo = """
+                QWidget { background-color: #181a1f; color: #eef2f7; }
+                QMainWindow, QDialog { background-color: #13151a; }
+                QGroupBox { border: 1px solid #3b414c; border-radius: 7px; margin-top: 10px; padding-top: 8px; font-weight: bold; }
+                QGroupBox::title { subcontrol-origin: margin; left: 10px; padding: 0 5px; }
+                QPushButton { background-color: #282c34; border: 1px solid #414754; border-radius: 6px; padding: 8px; }
+                QPushButton:hover { background-color: #343944; border-color: #61afef; }
+                QPushButton:pressed { background-color: #20232a; }
+                QPushButton:disabled { color: #727985; background-color: #20232a; }
+                QLineEdit, QComboBox, QPlainTextEdit { background-color: #20232a; color: #eef2f7; border: 1px solid #414754; border-radius: 5px; padding: 5px; }
+                QProgressBar { border: 1px solid #414754; border-radius: 4px; text-align: center; background: #20232a; }
+                QProgressBar::chunk { background-color: #61afef; border-radius: 3px; }
+            """
+        app = QApplication.instance()
+        if app:
+            app.setStyleSheet(estilo)
+        self.lista_servidores.aplicar_tema(tema)
+        self.log_playit.setStyleSheet(
+            "background-color: #ffffff; color: #1f2937; font-family: Consolas; font-size: 8pt;"
+            if tema == "claro" else
+            "background-color: #101217; color: #98c379; font-family: Consolas; font-size: 8pt;"
+        )
 
     def seleccionar_ejecutable_playit(self):
         ruta_inicial = os.path.dirname(self.ruta_playit) if self.ruta_playit else ""
@@ -201,6 +272,31 @@ class ServerLauncher(QMainWindow):
             self.ruta_playit = ruta
             self.guardar_configuracion_global()
             self.lbl_estado_playit.setText(f"Playit: listo ({os.path.basename(ruta)})")
+
+    def instalar_playit(self):
+        if self.worker_playit and self.worker_playit.isRunning():
+            return
+        self.btn_instalar_playit.setEnabled(False)
+        self.progreso_playit.setValue(0)
+        self.progreso_playit.setVisible(True)
+        self.worker_playit = PlayitDownloadWorker(self.RUTA_PLAYIT_INTERNO)
+        self.worker_playit.progreso.connect(self.progreso_playit.setValue)
+        self.worker_playit.estado.connect(self.lbl_estado_playit.setText)
+        self.worker_playit.finalizado.connect(self.playit_instalado)
+        self.worker_playit.start()
+
+    def playit_instalado(self, exito, mensaje, ruta):
+        self.btn_instalar_playit.setEnabled(True)
+        if exito:
+            self.ruta_playit = ruta
+            self.guardar_configuracion_global()
+            self.lbl_estado_playit.setText("Playit: instalado y listo")
+            self.log_playit.appendPlainText(f"[Launcher] {mensaje}")
+            QMessageBox.information(self, "Playit instalado", mensaje)
+        else:
+            self.progreso_playit.setValue(0)
+            self.lbl_estado_playit.setText("Playit: error de instalación")
+            QMessageBox.critical(self, "No se pudo instalar Playit", mensaje)
 
     def controlar_playit(self):
         if self.proceso_playit.state() == QProcess.ProcessState.NotRunning:
@@ -217,14 +313,39 @@ class ServerLauncher(QMainWindow):
             if mostrar_error:
                 QMessageBox.warning(self, "Playit no configurado", mensaje)
             return
+        if not self.playit_interactivo_compatible(self.ruta_playit):
+            mensaje = (
+                "El ejecutable instalado es el daemon 1.x y necesita un frontend IPC.\n\n"
+                "Pulsa 'Instalar / Actualizar Playit' para instalar el agente portable interactivo compatible."
+            )
+            self.lbl_estado_playit.setText("Playit: versión incompatible")
+            self.log_playit.appendPlainText(f"[Launcher] {mensaje}")
+            if mostrar_error:
+                QMessageBox.warning(self, "Playit incompatible", mensaje)
+            return
 
         self.log_playit.clear()
+        self.lbl_claim_playit.clear()
+        self.lbl_claim_playit.setVisible(False)
+        self.detencion_playit_solicitada = False
         self.log_playit.appendPlainText("[Launcher] Iniciando Playit...")
         self.proceso_playit.setWorkingDirectory(os.path.dirname(self.ruta_playit))
-        self.proceso_playit.start(self.ruta_playit, [])
+        self.proceso_playit.start(self.ruta_playit, ["--stdout"])
+
+    def playit_interactivo_compatible(self, ruta):
+        comprobacion = QProcess(self)
+        comprobacion.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)
+        comprobacion.start(ruta, ["version"])
+        if not comprobacion.waitForFinished(3000):
+            comprobacion.kill()
+            comprobacion.waitForFinished(1000)
+            return False
+        return comprobacion.exitStatus() == QProcess.ExitStatus.NormalExit and comprobacion.exitCode() == 0
 
     def detener_playit(self):
-        if self.proceso_playit.state() != QProcess.ProcessState.NotRunning:
+        if (self.proceso_playit.state() != QProcess.ProcessState.NotRunning
+                and not self.detencion_playit_solicitada):
+            self.detencion_playit_solicitada = True
             self.log_playit.appendPlainText("[Launcher] Deteniendo Playit...")
             self.proceso_playit.terminate()
 
@@ -234,19 +355,30 @@ class ServerLauncher(QMainWindow):
             texto = data.decode("utf-8")
         except UnicodeDecodeError:
             texto = data.decode("cp1252", errors="replace")
+        texto = re.sub(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])", "", texto)
         if texto.strip():
             self.log_playit.appendPlainText(texto.rstrip())
+            claim = re.search(r"https://playit\.gg/claim/[A-Za-z0-9_-]+", texto)
+            if claim:
+                url = claim.group(0)
+                self.lbl_claim_playit.setText(f'<a href="{url}">Vincular este agente en Playit</a>')
+                self.lbl_claim_playit.setVisible(True)
+                self.lbl_estado_playit.setText("Playit: pendiente de vinculación")
 
     def actualizar_estado_playit(self, estado):
         ejecutando = estado != QProcess.ProcessState.NotRunning
         self.btn_seleccionar_playit.setEnabled(not ejecutando)
+        descargando = self.worker_playit is not None and self.worker_playit.isRunning()
+        self.btn_instalar_playit.setEnabled(not ejecutando and not descargando)
         self.btn_playit.setText("■ Detener Playit" if ejecutando else "▶ Iniciar Playit")
         if estado == QProcess.ProcessState.Starting:
             self.lbl_estado_playit.setText("Playit: iniciando...")
         elif estado == QProcess.ProcessState.Running:
-            self.lbl_estado_playit.setText("Playit: conectado")
+            self.lbl_estado_playit.setText("Playit: en ejecución")
         else:
-            self.lbl_estado_playit.setText("Playit: detenido")
+            if not self.lbl_estado_playit.text().endswith("incompatible"):
+                self.lbl_estado_playit.setText("Playit: detenido")
+            self.detencion_playit_solicitada = False
 
     def error_proceso_playit(self, error):
         if error == QProcess.ProcessError.FailedToStart:
@@ -290,6 +422,8 @@ class ServerLauncher(QMainWindow):
             try:
                 with open(ruta_json, "r", encoding="utf-8") as f:
                     data = json.load(f)
+                if not isinstance(data, dict):
+                    data = {}
             except: pass
         
         data.update({
@@ -316,6 +450,18 @@ class ServerLauncher(QMainWindow):
             self.guardar_configuracion_global()
             self.cargar_instancias()
 
+    def abrir_creador_instancia(self):
+        javas = self.escanear_versiones_en_carpeta_javas()
+        java_exe = javas[max(javas)] if javas else None
+        dialogo = CreateServerDialog(
+            self.ruta_instancias,
+            self.obtener_grupos_instancias(),
+            java_exe=java_exe,
+            parent=self,
+        )
+        if dialogo.exec() == QDialog.DialogCode.Accepted:
+            self.cargar_instancias()
+
     def abrir_configuracion_instancia(self):
         item = self.lista_servidores.currentItem()
         if not item: return
@@ -324,7 +470,15 @@ class ServerLauncher(QMainWindow):
         ruta_servidor = os.path.join(self.ruta_instancias, nombre_carpeta)
         archivo_actual, java_actual = self.obtener_datos_instancia(ruta_servidor)
 
-        dialogo = ConfigInstanciaDialog(nombre_carpeta, ruta_servidor, archivo_actual, java_actual, self.ruta_javas_raiz, self)
+        dialogo = ConfigInstanciaDialog(
+            nombre_carpeta,
+            ruta_servidor,
+            archivo_actual,
+            java_actual,
+            self.ruta_javas_raiz,
+            grupos_disponibles=self.obtener_grupos_instancias(),
+            parent=self,
+        )
         # Ya no es estrictamente necesario conectar instancia_eliminada porque el Watcher lo detectará,
         # pero lo dejamos por seguridad.
         dialogo.instancia_eliminada.connect(self.cargar_instancias)
@@ -347,6 +501,7 @@ class ServerLauncher(QMainWindow):
                 dialogo.ruta_instancia, 
                 dialogo.archivo_seleccionado, 
                 dialogo.combo_java.currentData(),
+                grupo=dialogo.grupo_instancia,
                 ftb_nombre_real=dialogo.ftb_nombre_real,
                 ftb_modpack_id=dialogo.ftb_modpack_id
             )
@@ -394,28 +549,64 @@ class ServerLauncher(QMainWindow):
             QMessageBox.warning(self, "Instalación Cancelada", "La instalación desde ZIP fue cancelada o falló.")
 
     def cargar_instancias(self):
-        self.lista_servidores.clear()
+        servidores = []
         if os.path.exists(self.ruta_instancias):
             try:
                 for f in os.listdir(self.ruta_instancias):
                     ruta_sub = os.path.join(self.ruta_instancias, f)
                     if os.path.isdir(ruta_sub):
-                        item = QListWidgetItem(f)
-                        item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-                        
                         ruta_icon = os.path.join(ruta_sub, "icon.png")
-                        if os.path.exists(ruta_icon): item.setIcon(QIcon(ruta_icon))
-                        else: item.setIcon(QIcon.fromTheme("folder-remote"))
-                        
-                        self.lista_servidores.addItem(item)
+                        grupo = "No agrupado"
+                        ruta_config = os.path.join(ruta_sub, "config_instancia.json")
+                        if os.path.isfile(ruta_config):
+                            try:
+                                with open(ruta_config, "r", encoding="utf-8") as archivo:
+                                    datos = json.load(archivo)
+                                grupo = datos.get("grupo", "No agrupado") or "No agrupado"
+                            except (OSError, json.JSONDecodeError, AttributeError):
+                                pass
+                        servidores.append({
+                            "nombre": f,
+                            "grupo": grupo,
+                            "icono": ruta_icon if os.path.isfile(ruta_icon) else None,
+                        })
             except Exception: pass
+        self.lista_servidores.set_servidores(servidores)
         self.actualizar_estado_botones()
+
+    def obtener_grupos_instancias(self):
+        grupos = set(self.lista_servidores.grupos())
+        grupos.add("No agrupado")
+        return sorted(grupos)
+
+    def agrupar_instancia(self):
+        item = self.lista_servidores.currentItem()
+        if not item:
+            return
+        grupos = self.obtener_grupos_instancias()
+        grupo, aceptado = QInputDialog.getItem(
+            self,
+            "Agrupar instancia",
+            f"Grupo para '{item.text()}':",
+            grupos,
+            editable=True,
+        )
+        grupo = grupo.strip()
+        if not aceptado or not grupo:
+            return
+
+        ruta_instancia = os.path.join(self.ruta_instancias, item.text())
+        archivo, java = self.obtener_datos_instancia(ruta_instancia)
+        self.guardar_datos_instancia(ruta_instancia, archivo, java, grupo=grupo)
+        self.cargar_instancias()
 
     def actualizar_estado_botones(self, *_args):
         tiene_seleccion = self.lista_servidores.currentItem() is not None
         en_ejecucion = self.proceso_server.state() != QProcess.ProcessState.NotRunning
         self.btn_iniciar.setEnabled(tiene_seleccion or en_ejecucion)
         self.btn_config_instancia.setEnabled(tiene_seleccion and not en_ejecucion)
+        self.btn_agrupar_instancia.setEnabled(tiene_seleccion and not en_ejecucion)
+        self.btn_agregar_instancia.setEnabled(not en_ejecucion)
         self.btn_config_global.setEnabled(not en_ejecucion)
         self.btn_descargar_ftb.setEnabled(not en_ejecucion)
         self.btn_instalar_zip.setEnabled(not en_ejecucion)

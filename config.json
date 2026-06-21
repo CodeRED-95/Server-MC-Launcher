@@ -1,6 +1,7 @@
 {
     "ruta_instancias": "F:/Server_Minecraft",
     "ruta_javas_raiz": "D:/Projectos VS Code/java",
-    "ruta_playit": "",
-    "playit_auto": true
+    "ruta_playit": "D:\\Projectos VS Code\\Server MC Launcher\\tools\\playit\\playit.exe",
+    "playit_auto": false,
+    "tema": "oscuro"
 }
