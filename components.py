@@ -11,10 +11,11 @@ import webbrowser
 import zipfile
 from PyQt6.QtWidgets import (QDialog, QPlainTextEdit, QLineEdit, QPushButton, 
                              QHBoxLayout, QVBoxLayout, QLabel, QComboBox, 
-                              QProgressBar, QMessageBox, QFileDialog, QListWidget, QListWidgetItem)
+                              QProgressBar, QMessageBox, QFileDialog, QListWidget, QListWidgetItem,
+                              QTabWidget, QWidget, QSizePolicy)
 from PyQt6.QtWidgets import QGroupBox
-from PyQt6.QtCore import Qt, pyqtSignal, QRegularExpression, QUrl
-from PyQt6.QtGui import QSyntaxHighlighter, QTextCharFormat, QColor, QIcon, QDesktopServices
+from PyQt6.QtCore import Qt, pyqtSignal, QRegularExpression, QUrl, QSize
+from PyQt6.QtGui import QSyntaxHighlighter, QTextCharFormat, QColor, QIcon, QDesktopServices, QPixmap, QImage
 from workers import DownloaderWorker, FTBDownloadWorker, ZipExtractionWorker
 
 class LogHighlighter(QSyntaxHighlighter):
@@ -172,6 +173,7 @@ class ConfigGlobalDialog(QDialog):
         self.combo_descargas.addItem("Java 8 (Minecraft antiguos 1.7 - 1.12)", "https://github.com/adoptium/temurin8-binaries/releases/download/jdk8u412-b08/OpenJDK8U-jdk_x64_windows_hotspot_8u412b08.zip")
         self.combo_descargas.addItem("Java 17 (Versiones 1.17 a 1.20.4)", "https://github.com/adoptium/temurin17-binaries/releases/download/jdk-17.0.11%2B9/OpenJDK17U-jdk_x64_windows_hotspot_17.0.11_9.zip")
         self.combo_descargas.addItem("Java 21 (Versiones modernas 1.20.5+)", "https://github.com/adoptium/temurin21-binaries/releases/download/jdk-21.0.3%2B9/OpenJDK21U-jdk_x64_windows_hotspot_21.0.3_9.zip")
+        self.combo_descargas.addItem("Java 25 (Minecraft 26.x y class file 69)", "https://api.adoptium.net/v3/binary/latest/25/ga/windows/x64/jdk/hotspot/normal/eclipse")
 
         self.btn_descargar_java = QPushButton("⚡ Descargar e Instalar")
         self.lbl_estado_descarga = QLabel("Estado: Esperando acción...")
@@ -295,7 +297,7 @@ class ConfigInstanciaDialog(QDialog):
             self.intentar_recuperar_metadatos_log()
 
         self.setWindowTitle(f"Configurar Instancia: {nombre_instancia}")
-        self.resize(720, 680)
+        self.resize(780, 720)
 
         self.lbl_nombre = QLabel("Nombre de la instancia (Carpeta):")
         self.txt_nombre = QLineEdit(self.nombre_instancia)
@@ -326,9 +328,13 @@ class ConfigInstanciaDialog(QDialog):
             self.txt_icon.setText("icon.png (Personalizado Detectado)")
 
         self.grupo_mods = QGroupBox("Mods instalados")
+        self.grupo_mods.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.lbl_cantidad_mods = QLabel()
         self.lista_mods = QListWidget()
         self.lista_mods.setMinimumHeight(130)
+        self.lista_mods.setWordWrap(False)
+        self.lista_mods.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self.lista_mods.setIconSize(QSize(28, 28))
         self.btn_abrir_instancia = QPushButton("📂 Abrir carpeta de la instancia")
         self.btn_abrir_mods = QPushButton("🧩 Abrir carpeta de mods")
         layout_carpetas = QHBoxLayout()
@@ -336,7 +342,7 @@ class ConfigInstanciaDialog(QDialog):
         layout_carpetas.addWidget(self.btn_abrir_mods)
         layout_mods = QVBoxLayout(self.grupo_mods)
         layout_mods.addWidget(self.lbl_cantidad_mods)
-        layout_mods.addWidget(self.lista_mods)
+        layout_mods.addWidget(self.lista_mods, 1)
         layout_mods.addLayout(layout_carpetas)
         self.cargar_lista_mods()
 
@@ -371,32 +377,51 @@ class ConfigInstanciaDialog(QDialog):
         layout_icon.addWidget(self.txt_icon)
         layout_icon.addWidget(self.btn_buscar_icon)
 
+        tab_general = QWidget()
+        layout_general = QVBoxLayout(tab_general)
+        layout_general.addWidget(self.lbl_nombre)
+        layout_general.addWidget(self.txt_nombre)
+        layout_general.addSpacing(10)
+        layout_general.addWidget(self.lbl_info)
+        layout_general.addLayout(layout_archivo)
+        layout_general.addSpacing(10)
+        layout_general.addWidget(self.lbl_java)
+        layout_general.addWidget(self.combo_java)
+        layout_general.addSpacing(10)
+        layout_general.addWidget(self.lbl_grupo)
+        layout_general.addWidget(self.combo_grupo)
+        layout_general.addStretch()
+
+        tab_personalizacion = QWidget()
+        layout_personalizacion = QVBoxLayout(tab_personalizacion)
+        layout_personalizacion.addWidget(self.lbl_icon)
+        layout_personalizacion.addLayout(layout_icon)
+        layout_personalizacion.addStretch()
+
+        tab_mods = QWidget()
+        layout_tab_mods = QVBoxLayout(tab_mods)
+        layout_tab_mods.addWidget(self.grupo_mods, 1)
+
+        tab_acciones = QWidget()
+        layout_acciones = QVBoxLayout(tab_acciones)
+        layout_acciones.addWidget(self.btn_actualizar)
+        layout_acciones.addWidget(self.btn_actualizar_zip)
+        layout_acciones.addWidget(self.btn_eliminar)
+        layout_acciones.addStretch()
+
+        self.tabs = QTabWidget()
+        self.tabs.addTab(tab_general, "General")
+        self.tabs.addTab(tab_personalizacion, "Icono")
+        self.tabs.addTab(tab_mods, "Mods")
+        self.tabs.addTab(tab_acciones, "Acciones")
+
         layout_botones = QHBoxLayout()
-        layout_botones.addWidget(self.btn_eliminar)
-        layout_botones.addWidget(self.btn_actualizar)
-        layout_botones.addWidget(self.btn_actualizar_zip)
         layout_botones.addStretch()
         layout_botones.addWidget(self.btn_guardar)
         layout_botones.addWidget(self.btn_cancelar)
 
         layout_principal = QVBoxLayout()
-        layout_principal.addWidget(self.lbl_nombre)
-        layout_principal.addWidget(self.txt_nombre)
-        layout_principal.addSpacing(10)
-        layout_principal.addWidget(self.lbl_info)
-        layout_principal.addLayout(layout_archivo)
-        layout_principal.addSpacing(10)
-        layout_principal.addWidget(self.lbl_icon)
-        layout_principal.addLayout(layout_icon)
-        layout_principal.addSpacing(10)
-        layout_principal.addWidget(self.lbl_java)
-        layout_principal.addWidget(self.combo_java)
-        layout_principal.addSpacing(10)
-        layout_principal.addWidget(self.lbl_grupo)
-        layout_principal.addWidget(self.combo_grupo)
-        layout_principal.addSpacing(10)
-        layout_principal.addWidget(self.grupo_mods)
-        layout_principal.addSpacing(20)
+        layout_principal.addWidget(self.tabs)
         layout_principal.addLayout(layout_botones)
         self.setLayout(layout_principal)
 
@@ -424,42 +449,192 @@ class ConfigInstanciaDialog(QDialog):
             for archivo in sorted(os.listdir(ruta_mods), key=str.lower):
                 if archivo.lower().endswith((".jar", ".jar.disabled")):
                     mods.append(self.leer_info_mod(os.path.join(ruta_mods, archivo), archivo))
-        for nombre, version, archivo in mods:
-            texto = nombre
-            if version:
-                texto += f"  —  {version}"
-            texto += f"  [{archivo}]"
-            self.lista_mods.addItem(texto)
+        for mod in mods:
+            texto = self.formatear_mod_para_lista(mod)
+            item = QListWidgetItem(texto)
+            if mod.get("icono") is not None and not mod["icono"].isNull():
+                item.setIcon(mod["icono"])
+            item.setToolTip(self.formatear_mod_para_tooltip(mod))
+            item.setSizeHint(QSize(0, 28))
+            self.lista_mods.addItem(item)
         self.lbl_cantidad_mods.setText(f"{len(mods)} mod(s) encontrado(s)")
         if not mods:
             self.lista_mods.addItem("Esta instancia no contiene mods.")
 
+    def _icono_desde_bytes(self, datos):
+        if not datos:
+            return None
+        imagen = QImage.fromData(datos)
+        if imagen.isNull():
+            return None
+        return QIcon(QPixmap.fromImage(imagen))
+
+    def _leer_icono_mod_desde_zip(self, jar, ruta_icono):
+        if not ruta_icono:
+            return None
+        ruta_icono = ruta_icono.strip().lstrip("/\\")
+        if ruta_icono in jar.namelist():
+            try:
+                return self._icono_desde_bytes(jar.read(ruta_icono))
+            except OSError:
+                return None
+        return None
+
+    def _buscar_icono_respaldo(self, jar, mod_id=""):
+        candidatos = []
+        nombres = jar.namelist()
+        base_mod = (mod_id or "").strip()
+        extensiones = (".png", ".jpg", ".jpeg", ".webp")
+
+        for nombre in ("icon.png", "logo.png", "pack.png", "icon.jpg", "logo.jpg", "icon.jpeg", "logo.jpeg", "icon.webp", "logo.webp"):
+            if nombre in nombres:
+                candidatos.append(nombre)
+
+        if base_mod:
+            for prefijo in (f"{base_mod}/", f"assets/{base_mod}/", f"assets/{base_mod}/textures/"):
+                for nombre in ("icon.png", "logo.png", "pack.png", "icon.jpg", "logo.jpg", "icon.jpeg", "logo.jpeg", "icon.webp", "logo.webp"):
+                    ruta = f"{prefijo}{nombre}"
+                    if ruta in nombres:
+                        candidatos.append(ruta)
+
+        for nombre in nombres:
+            min_n = nombre.lower()
+            if any(ext in min_n for ext in ("icon", "logo")) and min_n.endswith(extensiones):
+                candidatos.append(nombre)
+
+        for candidato in candidatos:
+            try:
+                icono = self._icono_desde_bytes(jar.read(candidato))
+                if icono is not None:
+                    return icono
+            except OSError:
+                continue
+        return None
+
+    def _texto_no_vacio(self, valor):
+        if valor is None:
+            return ""
+        if isinstance(valor, str):
+            return valor.strip()
+        if isinstance(valor, (list, tuple, set)):
+            partes = [self._texto_no_vacio(v) for v in valor]
+            return ", ".join([p for p in partes if p])
+        if isinstance(valor, dict):
+            for clave in ("name", "display", "title", "value", "id"):
+                texto = self._texto_no_vacio(valor.get(clave))
+                if texto:
+                    return texto
+            return ""
+        return str(valor).strip()
+
+    def _extraer_autores(self, valor):
+        texto = self._texto_no_vacio(valor)
+        return texto.replace("\n", " ").strip()
+
+    def _extraer_minecraft_dep(self, depends):
+        if not isinstance(depends, dict):
+            return ""
+        valor = depends.get("minecraft")
+        if isinstance(valor, str):
+            return valor.strip()
+        if isinstance(valor, (list, tuple)):
+            return ", ".join(str(v).strip() for v in valor if str(v).strip())
+        return ""
+
+    def formatear_mod_para_lista(self, mod):
+        nombre = mod.get("nombre") or mod.get("mod_id") or "Mod desconocido"
+        version = mod.get("version", "")
+        archivo = mod.get("archivo", "")
+        version_texto = version or "sin versión"
+        archivo_texto = f"[{archivo}]" if archivo else ""
+        return "  —  ".join([parte for parte in (nombre, version_texto, archivo_texto) if parte])
+
+    def formatear_mod_para_tooltip(self, mod):
+        return self.formatear_mod_para_lista(mod)
+
     def leer_info_mod(self, ruta, nombre_archivo):
-        nombre = os.path.splitext(os.path.splitext(nombre_archivo)[0])[0]
-        version = ""
+        info = {
+            "nombre": os.path.splitext(os.path.splitext(nombre_archivo)[0])[0],
+            "version": "",
+            "archivo": nombre_archivo,
+            "icono": None,
+            "descripcion": "",
+            "mod_id": "",
+            "autores": "",
+            "loader": "",
+            "minecraft": "",
+        }
         try:
             with zipfile.ZipFile(ruta) as jar:
-                if "fabric.mod.json" in jar.namelist():
-                    data = json.loads(jar.read("fabric.mod.json").decode("utf-8"))
-                    return data.get("name") or data.get("id") or nombre, str(data.get("version", "")), nombre_archivo
+                nombres = set(jar.namelist())
+
+                for json_meta, loader_name in (("fabric.mod.json", "Fabric"), ("quilt.mod.json", "Quilt")):
+                    if json_meta in nombres:
+                        data = json.loads(jar.read(json_meta).decode("utf-8"))
+                        info["loader"] = loader_name
+                        info["nombre"] = self._texto_no_vacio(data.get("name")) or self._texto_no_vacio(data.get("id")) or info["nombre"]
+                        info["mod_id"] = self._texto_no_vacio(data.get("id"))
+                        info["version"] = self._texto_no_vacio(data.get("version"))
+                        info["descripcion"] = self._texto_no_vacio(data.get("description"))
+                        info["autores"] = self._extraer_autores(data.get("authors") or data.get("contributors"))
+                        info["minecraft"] = self._extraer_minecraft_dep(data.get("depends"))
+                        icono_field = data.get("icon")
+                        if isinstance(icono_field, dict):
+                            icono_field = next((valor for valor in icono_field.values() if isinstance(valor, str)), None)
+                        elif isinstance(icono_field, list):
+                            icono_field = next((valor for valor in icono_field if isinstance(valor, str)), None)
+                        info["icono"] = self._leer_icono_mod_desde_zip(jar, icono_field) or self._buscar_icono_respaldo(jar, info["mod_id"] or info["nombre"])
+                        return info
 
                 metadata = next(
                     (ruta_meta for ruta_meta in (
                         "META-INF/neoforge.mods.toml", "META-INF/mods.toml"
-                    ) if ruta_meta in jar.namelist()),
+                    ) if ruta_meta in nombres),
                     None,
                 )
                 if metadata:
                     contenido = jar.read(metadata).decode("utf-8", errors="replace")
+                    info["loader"] = "NeoForge" if "neoforge" in metadata.lower() else "Forge"
                     match_nombre = re.search(r'^\s*displayName\s*=\s*["\'](.+?)["\']', contenido, re.MULTILINE)
                     match_version = re.search(r'^\s*version\s*=\s*["\'](.+?)["\']', contenido, re.MULTILINE)
+                    match_icono = re.search(r'^\s*logoFile\s*=\s*["\'](.+?)["\']', contenido, re.MULTILINE)
+                    match_modid = re.search(r'^\s*modId\s*=\s*["\'](.+?)["\']', contenido, re.MULTILINE)
+                    match_desc = re.search(r'^\s*description\s*=\s*["\'](.+?)["\']', contenido, re.MULTILINE)
+                    match_authors = re.search(r'^\s*authors\s*=\s*["\'](.+?)["\']', contenido, re.MULTILINE)
                     if match_nombre:
-                        nombre = match_nombre.group(1)
+                        info["nombre"] = match_nombre.group(1)
+                    if match_modid:
+                        info["mod_id"] = match_modid.group(1)
                     if match_version and "${" not in match_version.group(1):
-                        version = match_version.group(1)
+                        info["version"] = match_version.group(1)
+                    if match_desc:
+                        info["descripcion"] = match_desc.group(1)
+                    if match_authors:
+                        info["autores"] = match_authors.group(1)
+                    if match_icono:
+                        info["icono"] = self._leer_icono_mod_desde_zip(jar, match_icono.group(1))
+                    if info["icono"] is None:
+                        info["icono"] = self._buscar_icono_respaldo(jar, info["mod_id"] or info["nombre"])
+                    return info
+
+                if "META-INF/MANIFEST.MF" in nombres:
+                    contenido = jar.read("META-INF/MANIFEST.MF").decode("utf-8", errors="replace")
+                    manifest = {}
+                    for linea in contenido.splitlines():
+                        if ": " in linea:
+                            clave, valor = linea.split(": ", 1)
+                            manifest[clave.strip()] = valor.strip()
+                    info["nombre"] = manifest.get("Implementation-Title") or manifest.get("Specification-Title") or info["nombre"]
+                    info["version"] = manifest.get("Implementation-Version") or manifest.get("Specification-Version") or info["version"]
+                    info["autores"] = manifest.get("Built-By") or manifest.get("Created-By") or ""
+                    info["descripcion"] = manifest.get("Implementation-Vendor") or manifest.get("Specification-Vendor") or ""
+                    info["icono"] = self._buscar_icono_respaldo(jar, info["mod_id"] or info["nombre"])
+                    return info
+
+                info["icono"] = self._buscar_icono_respaldo(jar, info["mod_id"] or info["nombre"])
         except (OSError, zipfile.BadZipFile, json.JSONDecodeError):
             pass
-        return nombre, version, nombre_archivo
+        return info
 
     def abrir_carpeta(self, ruta, crear=False):
         try:

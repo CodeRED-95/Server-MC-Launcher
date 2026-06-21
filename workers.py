@@ -8,6 +8,7 @@ import urllib.request
 import subprocess
 import shutil
 import hashlib
+import tempfile
 from PyQt6.QtCore import QThread, pyqtSignal
 
 
@@ -16,38 +17,25 @@ class PlayitDownloadWorker(QThread):
     estado = pyqtSignal(str)
     finalizado = pyqtSignal(bool, str, str)
 
-    # 1.x distribuye solo el daemon portable y necesita un frontend IPC separado.
-    # 0.17.1 sigue soportada oficialmente y conserva el flujo interactivo de claim.
+    # Instalador oficial firmado de Windows 64-bit para Playit 1.0.10.
     DOWNLOAD_URL = (
         "https://github.com/playit-cloud/playit-agent/releases/download/"
-        "v0.17.1/playit-windows-x86_64-signed.exe"
+        "v1.0.10/playit-windows-x86_64-signed.msi"
     )
-    EXPECTED_SHA256 = "9b00d6ff7d37d1052e5ae097e1348e11deae8617cd7a8ba39d1777f2006316a3"
+    EXPECTED_SHA256 = "18c022281fcfe578fb0d614ac6dc1d36cd6885b4a5439b97655768cd2a82bdc1"
 
     def __init__(self, ruta_destino):
         super().__init__()
         self.ruta_destino = ruta_destino
 
     def run(self):
-        ruta_temporal = self.ruta_destino + ".part"
+        ruta_temporal = os.path.join(tempfile.gettempdir(), "playit_install_64.msi")
         try:
-            if os.path.isfile(self.ruta_destino):
-                sha_actual = hashlib.sha256()
-                with open(self.ruta_destino, "rb") as archivo:
-                    for bloque in iter(lambda: archivo.read(1024 * 1024), b""):
-                        sha_actual.update(bloque)
-                if sha_actual.hexdigest().lower() == self.EXPECTED_SHA256:
-                    self.progreso.emit(100)
-                    self.finalizado.emit(
-                        True, "Playit ya está instalado y verificado.", self.ruta_destino
-                    )
-                    return
-
-            os.makedirs(os.path.dirname(self.ruta_destino), exist_ok=True)
+            self.estado.emit("Playit: descargando instalador oficial firmado...")
+            os.makedirs(os.path.dirname(ruta_temporal), exist_ok=True)
             ultimo_error = None
-            for intento in range(1, 5):
+            for intento in range(1, 4):
                 try:
-                    self.estado.emit(f"Playit: descargando agente oficial (intento {intento}/4)...")
                     req = urllib.request.Request(
                         self.DOWNLOAD_URL,
                         headers={"User-Agent": "Server-MC-Launcher"},
@@ -78,11 +66,44 @@ class PlayitDownloadWorker(QThread):
                 for bloque in iter(lambda: archivo.read(1024 * 1024), b""):
                     sha256.update(bloque)
             if sha256.hexdigest().lower() != self.EXPECTED_SHA256:
-                raise RuntimeError("La verificación SHA-256 del ejecutable de Playit falló.")
+                raise RuntimeError("La verificación SHA-256 del instalador de Playit falló.")
 
-            os.replace(ruta_temporal, self.ruta_destino)
+            self.estado.emit("Playit: ejecutando instalación silenciosa...")
+            msiexec = os.path.join(os.environ.get("WINDIR", r"C:\Windows"), "System32", "msiexec.exe")
+            comando = [msiexec, "/i", ruta_temporal, "/qn", "/norestart", "ALLUSERS=1"]
+            try:
+                resultado = subprocess.run(
+                    comando,
+                    capture_output=True,
+                    text=True,
+                    timeout=600,
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                    check=False,
+                )
+            except subprocess.TimeoutExpired as error:
+                raise RuntimeError("La instalación silenciosa de Playit tardó demasiado.") from error
+
+            if resultado.returncode not in (0, 3010):
+                detalle = (resultado.stdout or "") + ("\n" if resultado.stdout and resultado.stderr else "") + (resultado.stderr or "")
+                detalle = detalle.strip() or f"msiexec terminó con código {resultado.returncode}"
+                raise RuntimeError(f"No se pudo instalar Playit: {detalle}")
+
+            for _ in range(60):
+                if os.path.isfile(self.ruta_destino):
+                    break
+                time.sleep(1)
+            if not os.path.isfile(self.ruta_destino):
+                raise RuntimeError(
+                    "La instalación terminó, pero no se encontró playit.exe en "
+                    f"{self.ruta_destino}"
+                )
+
             self.progreso.emit(100)
-            self.finalizado.emit(True, "Playit se instaló correctamente dentro del launcher.", self.ruta_destino)
+            self.finalizado.emit(
+                True,
+                "Playit se instaló correctamente en C:\\Program Files\\playit_gg.",
+                self.ruta_destino,
+            )
         except Exception as error:
             if os.path.exists(ruta_temporal):
                 try:
