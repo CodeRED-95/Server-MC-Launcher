@@ -828,8 +828,9 @@ class ServerLauncher(QMainWindow):
                                 java_v = major - 44 # 52=8, 61=17, 65=21...
                                 if java_v > max_java: max_java = java_v
                         count += 1
-                        if count > 50: break # Escaneamos una muestra además de las clases principales
-            
+                        if count > 200:
+                            break # Muestra amplia para no dejar pasar loaders modernos
+
             # Java 17, 21 y 25 son las líneas LTS/objetivo usadas por Minecraft.
             if max_java <= 8: return 8
             if max_java <= 17: return 17
@@ -875,8 +876,6 @@ class ServerLauncher(QMainWindow):
                             java_v = major - 44
                             if java_v > max_java:
                                 max_java = java_v
-                        if max_java >= 21:
-                            return max_java
             except Exception:
                 continue
 

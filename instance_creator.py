@@ -4,6 +4,7 @@ import os
 import re
 import shutil
 import subprocess
+import time
 import urllib.request
 import xml.etree.ElementTree as ET
 
@@ -16,8 +17,10 @@ from PyQt6.QtWidgets import (
     QLabel,
     QLineEdit,
     QMessageBox,
+    QPlainTextEdit,
     QProgressBar,
     QPushButton,
+    QSizePolicy,
     QVBoxLayout,
 )
 
@@ -79,6 +82,7 @@ class ServerCatalogWorker(QThread):
 class ServerInstallWorker(QThread):
     progreso = pyqtSignal(int)
     estado = pyqtSignal(str)
+    log = pyqtSignal(str)
     finalizado = pyqtSignal(bool, str, str)
 
     def __init__(self, destino, nombre, grupo, tipo, version_mc, version_loader,
@@ -96,6 +100,7 @@ class ServerInstallWorker(QThread):
         self.ruta_instancia = os.path.join(destino, nombre)
 
     def _descargar(self, url, destino, progreso_inicio=10, progreso_fin=70):
+        self.log.emit(f"Descargando {os.path.basename(destino)}...")
         req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
         with urllib.request.urlopen(req, timeout=60) as respuesta, open(destino, "wb") as archivo:
             total = int(respuesta.headers.get("Content-Length", 0))
@@ -112,6 +117,7 @@ class ServerInstallWorker(QThread):
 
     def _instalar_vanilla(self):
         self.estado.emit("Consultando archivos oficiales de Mojang...")
+        self.log.emit("Consultando archivos oficiales de Mojang...")
         datos_version = json.loads(_leer_url(self.version_url).decode("utf-8"))
         servidor = datos_version.get("downloads", {}).get("server")
         if not servidor:
@@ -128,6 +134,7 @@ class ServerInstallWorker(QThread):
 
     def _instalar_fabric(self):
         self.estado.emit("Descargando servidor Fabric oficial...")
+        self.log.emit("Descargando servidor Fabric oficial...")
         url = (
             "https://meta.fabricmc.net/v2/versions/loader/"
             f"{self.version_mc}/{self.version_loader}/{self.fabric_installer}/server/jar"
@@ -151,25 +158,44 @@ class ServerInstallWorker(QThread):
 
         instalador = os.path.join(self.ruta_instancia, "loader-installer.jar")
         self.estado.emit(f"Descargando instalador oficial de {self.tipo}...")
+        self.log.emit(f"Descargando instalador oficial de {self.tipo}...")
         self._descargar(url, instalador, 10, 50)
         self.estado.emit(f"Instalando {self.tipo}; este paso puede tardar varios minutos...")
-        proceso = subprocess.run(
+        self.log.emit(f"Instalando {self.tipo}; este paso puede tardar varios minutos...")
+        proceso = subprocess.Popen(
             [self.java_exe, "-jar", instalador, "--installServer", self.ruta_instancia],
             cwd=self.ruta_instancia,
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
             text=True,
             encoding="utf-8",
             errors="replace",
             creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
-            timeout=600,
+            bufsize=1,
         )
+        salida = []
+        inicio = time.monotonic()
+        while True:
+            linea = proceso.stdout.readline()
+            if linea:
+                linea = linea.rstrip()
+                salida.append(linea)
+                if linea.strip():
+                    self.log.emit(linea)
+                    self.estado.emit(linea[:120])
+            elif proceso.poll() is not None:
+                break
+            elif time.monotonic() - inicio > 600:
+                proceso.kill()
+                raise RuntimeError(f"La instalación de {self.tipo} tardó demasiado.")
+        proceso.wait()
         try:
             os.remove(instalador)
         except OSError:
             pass
         if proceso.returncode != 0:
-            salida = (proceso.stdout + "\n" + proceso.stderr).strip()
-            raise RuntimeError(f"El instalador de {self.tipo} falló:\n{salida[-1500:]}")
+            detalle = "\n".join(salida).strip()
+            raise RuntimeError(f"El instalador de {self.tipo} falló:\n{detalle[-1500:]}")
         os.makedirs(os.path.join(self.ruta_instancia, "mods"), exist_ok=True)
         for candidato in ("run.bat", "start.bat"):
             if os.path.isfile(os.path.join(self.ruta_instancia, candidato)):
@@ -184,6 +210,9 @@ class ServerInstallWorker(QThread):
             os.makedirs(self.ruta_instancia)
             creada = True
             self.progreso.emit(5)
+            self.log.emit(f"Instancia: {self.nombre}")
+            self.log.emit(f"Tipo: {self.tipo}")
+            self.log.emit(f"Carpeta: {self.ruta_instancia}")
 
             if self.tipo == "Vanilla":
                 archivo_arranque = self._instalar_vanilla()
@@ -220,7 +249,7 @@ class CreateServerDialog(QDialog):
     def __init__(self, ruta_instancias, grupos, java_exe=None, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Añadir instancia de servidor")
-        self.resize(650, 430)
+        self.resize(760, 660)
         self.ruta_instancias = ruta_instancias
         self.java_exe = java_exe
         self.catalogo = None
@@ -248,6 +277,11 @@ class CreateServerDialog(QDialog):
 
         self.lbl_estado = QLabel("Cargando catálogos oficiales...")
         self.barra = QProgressBar()
+        self.lbl_log = QLabel("Log de creación:")
+        self.log_instalacion = QPlainTextEdit()
+        self.log_instalacion.setReadOnly(True)
+        self.log_instalacion.setMinimumHeight(220)
+        self.log_instalacion.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.btn_crear = QPushButton("Crear e instalar servidor")
         self.btn_crear.setEnabled(False)
         self.btn_cancelar = QPushButton("Cancelar")
@@ -261,7 +295,8 @@ class CreateServerDialog(QDialog):
         layout.addLayout(formulario)
         layout.addWidget(self.lbl_estado)
         layout.addWidget(self.barra)
-        layout.addStretch()
+        layout.addWidget(self.lbl_log)
+        layout.addWidget(self.log_instalacion, 1)
         layout.addLayout(botones)
 
         self.combo_tipo.currentTextChanged.connect(self.actualizar_loaders)
@@ -348,6 +383,7 @@ class CreateServerDialog(QDialog):
         )
         self.worker_instalacion.progreso.connect(self.barra.setValue)
         self.worker_instalacion.estado.connect(self.lbl_estado.setText)
+        self.worker_instalacion.log.connect(self.log_instalacion.appendPlainText)
         self.worker_instalacion.finalizado.connect(self.instalacion_finalizada)
         self.worker_instalacion.start()
 
