@@ -9,7 +9,148 @@ import subprocess
 import shutil
 import hashlib
 import tempfile
+import ctypes
+from ctypes import wintypes
 from PyQt6.QtCore import QThread, pyqtSignal
+
+class PlayitTuiWorker(QThread):
+    pantalla = pyqtSignal(str)
+    estado = pyqtSignal(str)
+    finalizado = pyqtSignal(int, str)
+
+    class COORD(ctypes.Structure):
+        _fields_ = [("X", wintypes.SHORT), ("Y", wintypes.SHORT)]
+
+    class SMALL_RECT(ctypes.Structure):
+        _fields_ = [
+            ("Left", wintypes.SHORT),
+            ("Top", wintypes.SHORT),
+            ("Right", wintypes.SHORT),
+            ("Bottom", wintypes.SHORT),
+        ]
+
+    class CONSOLE_SCREEN_BUFFER_INFO(ctypes.Structure):
+        pass
+
+    CONSOLE_SCREEN_BUFFER_INFO._fields_ = [
+        ("dwSize", COORD),
+        ("dwCursorPosition", COORD),
+        ("wAttributes", wintypes.WORD),
+        ("srWindow", SMALL_RECT),
+        ("dwMaximumWindowSize", COORD),
+    ]
+
+    def __init__(self, ejecutable, parent=None):
+        super().__init__(parent)
+        self.ejecutable = ejecutable
+        self._detener = False
+        self._proceso = None
+
+    def detener(self):
+        self._detener = True
+
+    def _leer_pantalla(self, pid):
+        if os.name != "nt":
+            return ""
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.AttachConsole.argtypes = [wintypes.DWORD]
+        kernel32.AttachConsole.restype = wintypes.BOOL
+        kernel32.GetStdHandle.argtypes = [wintypes.DWORD]
+        kernel32.GetStdHandle.restype = wintypes.HANDLE
+        kernel32.GetConsoleScreenBufferInfo.argtypes = [
+            wintypes.HANDLE,
+            ctypes.POINTER(self.CONSOLE_SCREEN_BUFFER_INFO),
+        ]
+        kernel32.GetConsoleScreenBufferInfo.restype = wintypes.BOOL
+        kernel32.ReadConsoleOutputCharacterW.argtypes = [
+            wintypes.HANDLE,
+            wintypes.LPWSTR,
+            wintypes.DWORD,
+            self.COORD,
+            ctypes.POINTER(wintypes.DWORD),
+        ]
+        kernel32.ReadConsoleOutputCharacterW.restype = wintypes.BOOL
+        kernel32.FreeConsole.restype = wintypes.BOOL
+        if not kernel32.AttachConsole(pid):
+            return ""
+        try:
+            salida = kernel32.GetStdHandle(wintypes.DWORD(-11 & 0xFFFFFFFF))
+            info = self.CONSOLE_SCREEN_BUFFER_INFO()
+            if not kernel32.GetConsoleScreenBufferInfo(salida, ctypes.byref(info)):
+                return ""
+
+            izquierda = info.srWindow.Left
+            ancho = info.srWindow.Right - izquierda + 1
+            lineas = []
+            for y in range(info.srWindow.Top, info.srWindow.Bottom + 1):
+                buffer = ctypes.create_unicode_buffer(ancho + 1)
+                leidos = wintypes.DWORD()
+                posicion = self.COORD(izquierda, y)
+                ok = kernel32.ReadConsoleOutputCharacterW(
+                    salida, buffer, ancho, posicion, ctypes.byref(leidos)
+                )
+                if ok:
+                    lineas.append(buffer.value[:leidos.value].rstrip())
+            return "\n".join(lineas).strip()
+        finally:
+            kernel32.FreeConsole()
+
+    def _detener_servicio(self):
+        try:
+            subprocess.run(
+                [self.ejecutable, "stop"],
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=8,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError):
+            pass
+
+    def _detener_servicios_playit(self):
+        self._detener_servicio()
+
+    def run(self):
+        codigo = -1
+        mensaje = ""
+        try:
+            if os.name == "nt":
+                # Una aplicación iniciada desde el IDE puede heredar su consola.
+                # Se libera para poder adjuntarse temporalmente a la TUI oculta.
+                ctypes.WinDLL("kernel32", use_last_error=True).FreeConsole()
+            inicio = subprocess.STARTUPINFO()
+            inicio.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            inicio.wShowWindow = 0
+            self._proceso = subprocess.Popen(
+                [self.ejecutable],
+                cwd=os.path.dirname(self.ejecutable),
+                creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0),
+                startupinfo=inicio,
+            )
+            self.estado.emit("Playit: en ejecución")
+            anterior = ""
+            while self._proceso.poll() is None and not self._detener:
+                pantalla = self._leer_pantalla(self._proceso.pid)
+                if pantalla and pantalla != anterior:
+                    anterior = pantalla
+                    self.pantalla.emit(pantalla)
+                self.msleep(500)
+
+            if self._detener:
+                self._detener_servicios_playit()
+                if self._proceso.poll() is None:
+                    self._proceso.terminate()
+                    try:
+                        self._proceso.wait(timeout=3)
+                    except subprocess.TimeoutExpired:
+                        self._proceso.kill()
+            codigo = self._proceso.wait(timeout=5)
+        except Exception as error:
+            mensaje = str(error)
+        finally:
+            self._proceso = None
+            self.finalizado.emit(codigo, mensaje)
 
 
 class PlayitDownloadWorker(QThread):
@@ -204,6 +345,48 @@ class DownloaderWorker(QThread):
                 except Exception: pass
             self.finalizado.emit(False, str(e))
 
+
+class FileDownloadWorker(QThread):
+    progreso = pyqtSignal(int)
+    estado = pyqtSignal(str)
+    finalizado = pyqtSignal(bool, str, str)
+
+    def __init__(self, url, destino_archivo, headers=None):
+        super().__init__()
+        self.url = url
+        self.destino_archivo = destino_archivo
+        self.headers = headers or {}
+
+    def run(self):
+        try:
+            carpeta = os.path.dirname(self.destino_archivo)
+            if carpeta:
+                os.makedirs(carpeta, exist_ok=True)
+
+            self.estado.emit("Descargando archivo...")
+            req = urllib.request.Request(self.url, headers=self.headers)
+            with urllib.request.urlopen(req, timeout=90) as respuesta, open(self.destino_archivo, "wb") as archivo:
+                total = int(respuesta.headers.get("Content-Length", 0) or 0)
+                descargado = 0
+                while True:
+                    bloque = respuesta.read(64 * 1024)
+                    if not bloque:
+                        break
+                    archivo.write(bloque)
+                    descargado += len(bloque)
+                    if total:
+                        self.progreso.emit(int((descargado / total) * 100))
+
+            self.progreso.emit(100)
+            self.finalizado.emit(True, "Descarga completada.", self.destino_archivo)
+        except Exception as e:
+            try:
+                if os.path.exists(self.destino_archivo):
+                    os.remove(self.destino_archivo)
+            except OSError:
+                pass
+            self.finalizado.emit(False, str(e), "")
+
 class ZipExtractionWorker(QThread):
     progreso = pyqtSignal(int)
     estado = pyqtSignal(str)
@@ -274,6 +457,7 @@ class ZipExtractionWorker(QThread):
 class FTBDownloadWorker(QThread):
     progreso = pyqtSignal(int)
     estado = pyqtSignal(str)
+    log = pyqtSignal(str)
     finalizado = pyqtSignal(bool, str)
 
     def __init__(self, url_instalador, ruta_destino_instancia, ruta_javas_raiz=None, id_modpack=None, id_version=None):
@@ -371,7 +555,9 @@ class FTBDownloadWorker(QThread):
                         # Si hay algo en el buffer antes de cerrar, lo mostramos
                         if buffer_linea.strip():
                             linea_final = ansi_cleaner.sub('', buffer_linea).strip()
-                            if linea_final: self.estado.emit(f"FTB: {linea_final}")
+                            if linea_final:
+                                self.log.emit(linea_final)
+                                self.estado.emit(f"FTB: {linea_final}")
                         break
                     continue
                 
@@ -383,6 +569,7 @@ class FTBDownloadWorker(QThread):
                     lower_linea = linea_sin_ansi.lower()
 
                     if linea_sin_ansi and not all(c in '.#= █' for c in linea_sin_ansi):
+                        self.log.emit(linea_sin_ansi)
                         self.estado.emit(f"FTB: {linea_sin_ansi}")
 
                     # INTERACCIÓN AUTOMÁTICA: Detectamos preguntas del instalador

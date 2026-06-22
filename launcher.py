@@ -16,7 +16,7 @@ from PyQt6.QtNetwork import QNetworkAccessManager, QNetworkRequest
 
 from components import ConsoleWindow, ConfigGlobalDialog, ConfigInstanciaDialog, FTBDownloaderDialog, ZipInstallerDialog
 from server_grid import GroupedServerGrid
-from workers import PlayitDownloadWorker
+from workers import PlayitDownloadWorker, PlayitTuiWorker
 from instance_creator import CreateServerDialog
 
 class ServerLauncher(QMainWindow):
@@ -170,10 +170,9 @@ class ServerLauncher(QMainWindow):
         self.setCentralWidget(container)
 
         self.proceso_server = QProcess(self)
-        self.proceso_playit = QProcess(self)
+        self.worker_playit_tui = None
         self.instancia_actual = None
         self.proceso_server.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)
-        self.proceso_playit.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)
         
         self.ventana_consola = None
 
@@ -198,16 +197,12 @@ class ServerLauncher(QMainWindow):
         self.proceso_server.finished.connect(self.servidor_terminado)
         self.proceso_server.stateChanged.connect(self.estado_servidor_cambiado)
         self.proceso_server.errorOccurred.connect(self.error_proceso_servidor)
-        self.proceso_playit.readyRead.connect(self.leer_salida_playit)
-        self.proceso_playit.stateChanged.connect(self.actualizar_estado_playit)
-        self.proceso_playit.errorOccurred.connect(self.error_proceso_playit)
-
         self.red_playit = QNetworkAccessManager(self)
         self.timer_direccion_playit = QTimer(self)
         self.timer_direccion_playit.setInterval(5000)
         self.timer_direccion_playit.timeout.connect(self.consultar_direccion_playit)
 
-        # Sistema de actualizaciÃ³n automÃ¡tica: Observador de la carpeta de instancias
+        # Sistema de actualización automática: observador de la carpeta de instancias
         self.watcher = QFileSystemWatcher()
         if os.path.exists(self.ruta_instancias):
             self.watcher.addPath(self.ruta_instancias)
@@ -330,14 +325,14 @@ class ServerLauncher(QMainWindow):
             QMessageBox.critical(self, "No se pudo instalar Playit", mensaje)
 
     def controlar_playit(self):
-        if self.proceso_playit.state() == QProcess.ProcessState.NotRunning:
+        if not self.worker_playit_tui or not self.worker_playit_tui.isRunning():
             self.playit_intentos_reinicio = 0
             self.iniciar_playit(mostrar_error=True)
         else:
             self.detener_playit()
 
     def iniciar_playit(self, mostrar_error=False, limpiar_historial=True):
-        if self.proceso_playit.state() != QProcess.ProcessState.NotRunning:
+        if self.worker_playit_tui and self.worker_playit_tui.isRunning():
             return
         if not self.ruta_playit or not os.path.isfile(self.ruta_playit):
             if os.path.isfile(self.RUTA_PLAYIT_INSTALADO):
@@ -359,29 +354,24 @@ class ServerLauncher(QMainWindow):
             self.playit_respondio_reset = False
         self.detencion_playit_solicitada = False
         self.log_playit.appendPlainText("[Launcher] Iniciando Playit...")
-        self.proceso_playit.setWorkingDirectory(os.path.dirname(self.ruta_playit))
-        # El instalador actual usa un servicio de Windows. --stdout inicia o se
-        # adjunta al servicio sin abrir la interfaz TUI que requiere una consola.
-        self.proceso_playit.start(self.ruta_playit, ["--stdout"])
+        self.btn_playit.setText("■ Detener Playit")
+        self.btn_instalar_playit.setEnabled(False)
+        self.lbl_estado_playit.setText("Playit: iniciando TUI oculta...")
+        self.worker_playit_tui = PlayitTuiWorker(self.ruta_playit, self)
+        self.worker_playit_tui.pantalla.connect(self.procesar_pantalla_playit)
+        self.worker_playit_tui.estado.connect(self.lbl_estado_playit.setText)
+        self.worker_playit_tui.finalizado.connect(self.playit_tui_finalizado)
+        self.worker_playit_tui.start()
+        self.timer_direccion_playit.start()
         QTimer.singleShot(1500, self.consultar_direccion_playit)
 
     def detener_playit(self):
-        if (self.proceso_playit.state() != QProcess.ProcessState.NotRunning
+        if (self.worker_playit_tui and self.worker_playit_tui.isRunning()
                 and not self.detencion_playit_solicitada):
             self.detencion_playit_solicitada = True
             self.log_playit.appendPlainText("[Launcher] Deteniendo Playit...")
             self.btn_playit.setEnabled(False)
-            self.proceso_playit.terminate()
-            QTimer.singleShot(1500, self.forzar_detencion_playit)
-
-    def forzar_detencion_playit(self):
-        if self.proceso_playit.state() == QProcess.ProcessState.NotRunning:
-            return
-        pid = self.proceso_playit.processId()
-        if os.name == "nt" and pid:
-            QProcess.execute("taskkill.exe", ["/PID", str(pid), "/T", "/F"])
-        if self.proceso_playit.state() != QProcess.ProcessState.NotRunning:
-            self.proceso_playit.kill()
+            self.worker_playit_tui.detener()
 
     def copiar_direccion_playit(self):
         direccion = self.txt_direccion_playit.text().strip()
@@ -443,18 +433,18 @@ class ServerLauncher(QMainWindow):
         finally:
             respuesta.deleteLater()
 
-    def leer_salida_playit(self):
-        data = self.proceso_playit.readAll().data()
-        try:
-            texto = data.decode("utf-8")
-        except UnicodeDecodeError:
-            texto = data.decode("cp1252", errors="replace")
-        texto = re.sub(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])", "", texto)
-        self.buffer_salida_playit += texto.replace("\r", "\n")
-        lineas = self.buffer_salida_playit.split("\n")
-        self.buffer_salida_playit = lineas.pop()
-        for linea in lineas:
-            self.procesar_linea_playit(linea.strip())
+    def procesar_pantalla_playit(self, pantalla):
+        direccion = self.extraer_direccion_playit(pantalla)
+        if direccion:
+            self.establecer_direccion_playit(direccion)
+
+        claim = re.search(r"https://playit\.gg/claim/[A-Za-z0-9_-]+", pantalla)
+        if claim:
+            self.procesar_linea_playit(claim.group(0))
+        elif "No tunnels configured" in pantalla:
+            self.lbl_estado_playit.setText("Playit: conectado, sin túneles")
+        elif "Verified" in pantalla and not direccion:
+            self.lbl_estado_playit.setText("Playit: agente verificado")
 
     def procesar_linea_playit(self, linea):
         if not linea:
@@ -482,11 +472,7 @@ class ServerLauncher(QMainWindow):
 
         if "invalid secret, do you want to reset" in linea.lower() and not self.playit_respondio_reset:
             self.playit_respondio_reset = True
-            try:
-                self.proceso_playit.write(b"Y\n")
-                self.log_playit.appendPlainText("[Playit] Respuesta automática: Y")
-            except Exception:
-                pass
+            self.log_playit.appendPlainText("[Playit] La clave guardada no es válida; vuelve a vincular el agente.")
             return
 
         if linea.endswith("TUNNELS"):
@@ -533,34 +519,24 @@ class ServerLauncher(QMainWindow):
         self.log_playit.appendPlainText(f"[Playit] Host público detectado: {direccion}")
         self.guardar_configuracion_global()
 
-    def actualizar_estado_playit(self, estado):
-        ejecutando = estado != QProcess.ProcessState.NotRunning
+    def playit_tui_finalizado(self, codigo, mensaje):
+        self.timer_direccion_playit.stop()
+        solicitado = self.detencion_playit_solicitada
+        self.detencion_playit_solicitada = False
+        self.btn_playit.setEnabled(True)
+        self.btn_playit.setText("▶ Iniciar Playit")
         descargando = self.worker_playit is not None and self.worker_playit.isRunning()
-        self.btn_instalar_playit.setEnabled(not ejecutando and not descargando)
-        self.btn_playit.setText("■ Detener Playit" if ejecutando else "▶ Iniciar Playit")
-        if estado == QProcess.ProcessState.Starting:
-            self.lbl_estado_playit.setText("Playit: iniciando...")
-        elif estado == QProcess.ProcessState.Running:
-            self.lbl_estado_playit.setText("Playit: en ejecución")
-            if not self.timer_direccion_playit.isActive():
-                self.timer_direccion_playit.start()
-        else:
-            self.timer_direccion_playit.stop()
-            if self.detencion_playit_solicitada:
-                self.lbl_estado_playit.setText("Playit: detenido")
-            else:
-                self.lbl_estado_playit.setText("Playit: servicio no disponible")
-            self.detencion_playit_solicitada = False
-            self.btn_playit.setEnabled(True)
-
-    def error_proceso_playit(self, error):
-        if error == QProcess.ProcessError.FailedToStart:
-            detalle = self.proceso_playit.errorString()
-            self.log_playit.appendPlainText(f"[Launcher] No se pudo iniciar Playit: {detalle}")
+        self.btn_instalar_playit.setEnabled(not descargando)
+        if mensaje:
+            self.log_playit.appendPlainText(f"[Launcher] No se pudo ejecutar Playit: {mensaje}")
             self.lbl_estado_playit.setText("Playit: error al iniciar")
+        elif solicitado:
+            self.lbl_estado_playit.setText("Playit: detenido")
+        else:
+            self.lbl_estado_playit.setText(f"Playit: TUI finalizada (código {codigo})")
 
     def reiniciar_playit_si_falla(self):
-        if self.proceso_playit.state() != QProcess.ProcessState.NotRunning:
+        if self.worker_playit_tui and self.worker_playit_tui.isRunning():
             return
         self.log_playit.appendPlainText("[Launcher] Reintentando Playit tras la validación del agente...")
         self.iniciar_playit(mostrar_error=False, limpiar_historial=False)
@@ -655,7 +631,7 @@ class ServerLauncher(QMainWindow):
     def abrir_configuracion_global(self):
         dialogo = ConfigGlobalDialog(self.ruta_instancias, self.ruta_javas_raiz, self)
         if dialogo.exec() == QDialog.DialogCode.Accepted:
-            # Actualizamos el observador si la ruta cambiÃ³
+            # Actualizamos el observador si la ruta cambió
             if self.ruta_instancias != dialogo.ruta_instancias:
                 if self.ruta_instancias in self.watcher.directories():
                     self.watcher.removePath(self.ruta_instancias)
@@ -696,7 +672,7 @@ class ServerLauncher(QMainWindow):
             grupos_disponibles=self.obtener_grupos_instancias(),
             parent=self,
         )
-        # Ya no es estrictamente necesario conectar instancia_eliminada porque el Watcher lo detectarÃ¡,
+        # Ya no es estrictamente necesario conectar instancia_eliminada porque el watcher lo detectará,
         # pero lo dejamos por seguridad.
         dialogo.instancia_eliminada.connect(self.cargar_instancias)
         
@@ -713,7 +689,7 @@ class ServerLauncher(QMainWindow):
         dialogo.solicitar_actualizacion_zip.connect(manejar_actualizacion_zip)
 
         if dialogo.exec() == QDialog.DialogCode.Accepted:
-            # Usamos la ruta del diÃ¡logo por si se renombrÃ³ la carpeta durante la configuraciÃ³n
+            # Usamos la ruta del diálogo por si se renombró la carpeta durante la configuración
             self.guardar_datos_instancia(
                 dialogo.ruta_instancia, 
                 dialogo.archivo_seleccionado, 
@@ -722,11 +698,11 @@ class ServerLauncher(QMainWindow):
                 ftb_nombre_real=dialogo.ftb_nombre_real,
                 ftb_modpack_id=dialogo.ftb_modpack_id
             )
-            # Forzamos una recarga para actualizar el texto en la cuadrÃ­cula inmediatamente
+            # Forzamos una recarga para actualizar el texto en la cuadrícula inmediatamente
             self.cargar_instancias()
 
     def abrir_descargador_ftb(self, busqueda=None, ruta_update=None, modpack_id=None, version_actual=None):
-        # VerificaciÃ³n preventiva de permisos de Administrador en Windows
+        # Verificación preventiva de permisos de administrador en Windows
         if os.name == 'nt':
             try:
                 is_admin = ctypes.windll.shell32.IsUserAnAdmin() != 0
@@ -735,7 +711,7 @@ class ServerLauncher(QMainWindow):
                 
             if not is_admin:
                 QMessageBox.warning(
-                    self, "AtenciÃ³n: Sin permisos", 
+                    self, "Atención: Sin permisos", 
                     "El instalador de FTB requiere permisos de Administrador para funcionar.\n\n"
                     "IMPORTANTE: Haz click derecho en el acceso directo del programa y selecciona "
                     "'Ejecutar como administrador' antes de intentar descargar."
@@ -745,7 +721,7 @@ class ServerLauncher(QMainWindow):
                                       modpack_id=modpack_id, version_actual=version_actual, parent=self)
         if busqueda and not isinstance(busqueda, bool):
             dialogo.set_busqueda_inicial(busqueda)
-        dialogo.exec() # El watcher actualizarÃ¡ la lista en cuanto se cree la carpeta de la instancia
+        dialogo.exec() # El watcher actualizará la lista en cuanto se cree la carpeta de la instancia
 
     def abrir_instalador_zip(self, ruta_update=None):
         # 1. Seleccionar archivo ZIP
@@ -754,16 +730,16 @@ class ServerLauncher(QMainWindow):
         )
         if not zip_file: return
 
-        # 2. Abrir diÃ¡logo para nombre de instancia y descompresiÃ³n
+        # 2. Abrir diálogo para nombre de instancia y descompresión
         dialogo = ZipInstallerDialog(zip_file, self.ruta_instancias, ruta_update=ruta_update, parent=self)
         if dialogo.exec() == QDialog.DialogCode.Accepted:
             QMessageBox.information(
-                self, "InstalaciÃ³n Completada",
+                self, "Instalación Completada",
                 f"La instancia '{dialogo.instance_name}' ha sido instalada correctamente desde el ZIP."
             )
             self.cargar_instancias()
         else:
-            QMessageBox.warning(self, "InstalaciÃ³n Cancelada", "La instalaciÃ³n desde ZIP fue cancelada o fallÃ³.")
+            QMessageBox.warning(self, "Instalación Cancelada", "La instalación desde ZIP fue cancelada o falló.")
 
     def cargar_instancias(self):
         servidores = []
@@ -830,7 +806,7 @@ class ServerLauncher(QMainWindow):
         self.lista_servidores.setEnabled(not en_ejecucion)
 
     def detectar_version_java_de_jar(self, ruta_jar):
-        """Detecta la versiÃ³n de Java escaneando las clases del JAR y tomando la mÃ¡s alta requerida."""
+        """Detecta la versión de Java escaneando las clases del JAR y tomando la más alta requerida."""
         if not os.path.exists(ruta_jar): return 17
         max_java = 8
         try:
@@ -852,15 +828,65 @@ class ServerLauncher(QMainWindow):
                                 java_v = major - 44 # 52=8, 61=17, 65=21...
                                 if java_v > max_java: max_java = java_v
                         count += 1
-                        if count > 50: break # Escaneamos una muestra ademÃ¡s de las clases principales
+                        if count > 50: break # Escaneamos una muestra además de las clases principales
             
-            # Java 17, 21 y 25 son las lÃ­neas LTS/objetivo usadas por Minecraft.
+            # Java 17, 21 y 25 son las líneas LTS/objetivo usadas por Minecraft.
             if max_java <= 8: return 8
             if max_java <= 17: return 17
             if max_java <= 21: return 21
             return max_java
         except Exception: 
             return 17
+
+    def detectar_version_java_en_instancia(self, ruta_servidor):
+        """Detecta la versión mínima de Java necesaria revisando el servidor y sus librerías."""
+        max_java = 8
+        candidatos = []
+        ruta_jar = os.path.join(ruta_servidor, "server.jar")
+        if os.path.exists(ruta_jar):
+            candidatos.append(ruta_jar)
+
+        for raiz, _, archivos in os.walk(ruta_servidor):
+            raiz_rel = os.path.relpath(raiz, ruta_servidor).replace("\\", "/").lower()
+            if raiz_rel not in (".", "") and not raiz_rel.startswith("libraries"):
+                continue
+            for archivo in archivos:
+                if archivo.lower().endswith(".jar"):
+                    candidatos.append(os.path.join(raiz, archivo))
+
+        vistos = set()
+        for jar in candidatos:
+            jar_norm = os.path.normpath(jar).lower()
+            if jar_norm in vistos:
+                continue
+            vistos.add(jar_norm)
+            try:
+                with zipfile.ZipFile(jar, "r") as z:
+                    nombres = z.namelist()
+                    prioritarios = [n for n in ("net/minecraft/server/Main.class", "net/minecraft/bundler/Main.class") if n in nombres]
+                    for name in prioritarios + nombres:
+                        if not name.endswith(".class"):
+                            continue
+                        with z.open(name) as f:
+                            if f.read(4) != b"\xca\xfe\xba\xbe":
+                                continue
+                            f.read(2)
+                            major = struct.unpack(">H", f.read(2))[0]
+                            java_v = major - 44
+                            if java_v > max_java:
+                                max_java = java_v
+                        if max_java >= 21:
+                            return max_java
+            except Exception:
+                continue
+
+        if max_java <= 8:
+            return 8
+        if max_java <= 17:
+            return 17
+        if max_java <= 21:
+            return 21
+        return max_java
 
     def escanear_versiones_en_carpeta_javas(self):
         javas_disponibles = {}
@@ -888,7 +914,7 @@ class ServerLauncher(QMainWindow):
         return None
 
     def verificar_y_aceptar_eula(self, ruta_servidor):
-        """Busca el archivo eula.txt y solicita aceptaciÃ³n si detecta eula=false."""
+        """Busca el archivo eula.txt y solicita aceptación si detecta eula=false."""
         ruta_eula = os.path.join(ruta_servidor, "eula.txt")
         if not os.path.exists(ruta_eula):
             # Si no existe, permitimos el arranque para que el server lo genere
@@ -901,7 +927,7 @@ class ServerLauncher(QMainWindow):
             if any("eula=false" in linea.lower() for linea in lineas):
                 respuesta = QMessageBox.question(
                     self, "Aceptar EULA de Minecraft",
-                    "Para ejecutar el servidor, debes aceptar los tÃ©rminos de la EULA de Mojang.\n\n"
+                    "Para ejecutar el servidor, debes aceptar los términos de la EULA de Mojang.\n\n"
                     "¿Deseas aceptar el Contrato de Licencia (eula.txt) ahora?",
                     QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
                 )
@@ -915,7 +941,7 @@ class ServerLauncher(QMainWindow):
                                 f.write(linea)
                     return True
                 else:
-                    return False # El usuario rechazÃ³, no iniciamos el server
+                    return False # El usuario rechazó, no iniciamos el server
         except Exception as e:
             print(f"Error al procesar EULA: {e}")
             
@@ -933,9 +959,9 @@ class ServerLauncher(QMainWindow):
                 if f.endswith(".jar") and ("forge" in f or "fabric" in f or "paper" in f or "server" in f):
                     jar_principal = os.path.join(ruta_servidor, f)
                     break
-                    
-        if os.path.exists(jar_principal):
-            version_requerida = self.detectar_version_java_de_jar(jar_principal)
+
+        if os.path.isdir(os.path.join(ruta_servidor, "libraries")) or os.path.exists(jar_principal):
+            version_requerida = self.detectar_version_java_en_instancia(ruta_servidor)
             
         # Si es Forge moderno, nunca permitimos bajar de Java 17
         if es_forge_moderno and version_requerida < 17:
@@ -954,7 +980,7 @@ class ServerLauncher(QMainWindow):
     def detener_servidor_desde_consola(self):
         if self.proceso_server.state() == QProcess.ProcessState.Running:
             if self.ventana_consola:
-                self.ventana_consola.consola.appendPlainText("\n[Launcher] DetenciÃ³n solicitada desde la terminal...")
+                self.ventana_consola.consola.appendPlainText("\n[Launcher] Detención solicitada desde la terminal...")
             self.proceso_server.write(b"stop\n")
 
     def controlar_servidor(self):
@@ -965,7 +991,7 @@ class ServerLauncher(QMainWindow):
             nombre_carpeta = item_seleccionado.text()
             ruta_servidor = os.path.join(self.ruta_instancias, nombre_carpeta)
             
-            # VerificaciÃ³n proactiva del EULA antes de lanzar el proceso
+            # Verificación proactiva del EULA antes de lanzar el proceso
             if not self.verificar_y_aceptar_eula(ruta_servidor):
                 return
 
@@ -985,30 +1011,30 @@ class ServerLauncher(QMainWindow):
                 QMessageBox.critical(
                     self, "Falta Entorno Java", 
                     f"La instancia '{nombre_carpeta}' requiere **Java {version_necesitada}** para iniciar, "
-                    f"pero tu carpeta de entornos portables estÃ¡ vacÃ­a.\n\n"
-                    f"SoluciÃ³n: Ve a 'Ajustes / Java' y descarga e instala **Java {version_necesitada}**."
+                    f"pero tu carpeta de entornos portables está vacía.\n\n"
+                    f"Solución: Ve a 'Ajustes / Java' y descarga e instala **Java {version_necesitada}**."
                 )
                 return
                 
             if isinstance(java_exe_real, str) and java_exe_real.startswith("ERROR_INCOMPATIBLE"):
                 version_necesitada = java_exe_real.split(":")[1]
                 QMessageBox.critical(
-                    self, "VersiÃ³n Incompatible Detectada", 
-                    f"AnÃ¡lisis del archivo de arranque:\n"
+                    self, "Versión Incompatible Detectada", 
+                    f"Análisis del archivo de arranque:\n"
                     f"➔ Esta instancia requiere estrictamente **Java {version_necesitada}**.\n\n"
-                    f"Estado actual: Tienes otras versiones descargadas, pero ninguna coincide con la versiÃ³n {version_necesitada}.\n\n"
-                    f"SoluciÃ³n:\n"
+                    f"Estado actual: Tienes otras versiones descargadas, pero ninguna coincide con la versión {version_necesitada}.\n\n"
+                    f"Solución:\n"
                     f"1. Abre 'Ajustes / Java' y descarga **Java {version_necesitada}**.\n"
                     f"2. O de lo contrario, ve a 'Configurar Instancia' y fuerza un Java fijo de los que posees."
                 )
                 return
 
             if java_exe_real is None:
-                QMessageBox.critical(self, "Entorno no encontrado", "No se pudo encontrar un entorno ejecutable vÃ¡lido.")
+                QMessageBox.critical(self, "Entorno no encontrado", "No se pudo encontrar un entorno ejecutable válido.")
                 return
 
             if not ejecutable:
-                QMessageBox.critical(self, "Falta Ejecutable", "No se detectÃ³ ningÃºn script de inicio (.bat) o archivo .jar principal.")
+                QMessageBox.critical(self, "Falta Ejecutable", "No se detectó ningún script de inicio (.bat) o archivo .jar principal.")
                 return
 
             self.instancia_actual = nombre_carpeta
@@ -1031,7 +1057,7 @@ class ServerLauncher(QMainWindow):
             if ejecutable.endswith(".bat"):
                 comando = "cmd.exe"
                 argumentos = ["/c", ejecutable]
-                # Solo aÃ±adimos nogui si no es el instalador inicial de un modpack (ZIP)
+                # Solo añadimos nogui si no es el instalador inicial de un modpack (ZIP)
                 if ejecutable != "startserver.bat":
                     argumentos.append("nogui")
             else:
@@ -1059,7 +1085,7 @@ class ServerLauncher(QMainWindow):
         except UnicodeDecodeError: texto = data.decode("cp1252", errors="replace")
         
         if self.ventana_consola:
-            # DetecciÃ³n multilingÃ¼e de la pausa de Windows (.bat)
+            # Detección multilingüe de la pausa de Windows (.bat)
             prompts_pausa = [
                 "Presione una tecla para continuar",
                 "Press any key to continue",
@@ -1069,18 +1095,18 @@ class ServerLauncher(QMainWindow):
             if any(p in texto for p in prompts_pausa):
                 self.proceso_server.write(b"\n")
             else:
-                # Filtramos lÃ­neas que son ecos del comando pause para limpiar el log final
+                # Filtramos líneas que son ecos del comando pause para limpiar el log final
                 if not texto.strip().endswith(">pause"):
                     self.ventana_consola.consola.appendPlainText(texto.rstrip())
 
     def servidor_terminado(self):
         if self.ventana_consola:
-            # Obtenemos el cÃ³digo de salida para informar al usuario
+            # Obtenemos el código de salida para informar al usuario
             exit_code = self.proceso_server.exitCode()
-            mensaje = "\n[Launcher] El servidor se ha detenido correctamente." if exit_code == 0 else f"\n[Launcher] EL SERVIDOR SE CERRÃ“ CON ERRORES (CÃ³digo: {exit_code})"
+            mensaje = "\n[Launcher] El servidor se ha detenido correctamente." if exit_code == 0 else f"\n[Launcher] EL SERVIDOR SE CERRÓ CON ERRORES (Código: {exit_code})"
             self.ventana_consola.consola.appendPlainText(mensaje)
             
-            # Cambiamos el botÃ³n de detener para que ahora sirva para cerrar la ventana manualmente
+            # Cambiamos el botón de detener para que ahora sirva para cerrar la ventana manualmente
             self.ventana_consola.btn_stop_consola.setText("❌ Cerrar Ventana de Terminal")
             self.ventana_consola.btn_stop_consola.setStyleSheet("background-color: #4a4a4a; color: white; padding: 6px;")
             try:
@@ -1088,7 +1114,7 @@ class ServerLauncher(QMainWindow):
                 self.ventana_consola.btn_stop_consola.clicked.connect(self.ventana_consola.close)
             except: pass
 
-        # LÃ³gica de transiciÃ³n post-instalaciÃ³n (ZIP): de startserver.bat a run.bat
+        # Lógica de transición post-instalación (ZIP): de startserver.bat a run.bat
         if self.instancia_actual:
             ruta_servidor = os.path.join(self.ruta_instancias, self.instancia_actual)
             archivo_actual, java_actual = self.obtener_datos_instancia(ruta_servidor)
@@ -1096,7 +1122,7 @@ class ServerLauncher(QMainWindow):
                 if os.path.exists(os.path.join(ruta_servidor, "run.bat")):
                     self.guardar_datos_instancia(ruta_servidor, "run.bat", java_actual)
                     if self.ventana_consola:
-                        self.ventana_consola.consola.appendPlainText("\n[Launcher] ConfiguraciÃ³n de arranque actualizada: se detectÃ³ 'run.bat' tras la instalaciÃ³n.")
+                        self.ventana_consola.consola.appendPlainText("\n[Launcher] Configuración de arranque actualizada: se detectó 'run.bat' tras la instalación.")
 
         self.btn_iniciar.setText("🚀 Iniciar Servidor")
         self.instancia_actual = None
@@ -1119,24 +1145,22 @@ class ServerLauncher(QMainWindow):
         if self.proceso_server.state() != QProcess.ProcessState.NotRunning:
             QMessageBox.warning(
                 self,
-                "Servidor en ejecuciÃ³n",
-                "DetÃ©n el servidor y espera a que termine de guardar el mundo antes de cerrar el launcher.",
+                "Servidor en ejecución",
+                "Detén el servidor y espera a que termine de guardar el mundo antes de cerrar el launcher.",
             )
             event.ignore()
             return
 
-        if self.proceso_playit.state() != QProcess.ProcessState.NotRunning:
-            self.proceso_playit.terminate()
-            if not self.proceso_playit.waitForFinished(2000):
-                self.proceso_playit.kill()
-                self.proceso_playit.waitForFinished(1000)
+        if self.worker_playit_tui and self.worker_playit_tui.isRunning():
+            self.worker_playit_tui.detener()
+            self.worker_playit_tui.wait(15000)
         super().closeEvent(event)
 
     def keyPressEvent(self, event):
-        """Captura la pulsaciÃ³n de teclas a nivel global en la ventana principal."""
+        """Captura la pulsación de teclas a nivel global en la ventana principal."""
         # Si el usuario presiona la tecla F5
         if event.key() == Qt.Key.Key_F5:
-            # Volvemos a ejecutar la funciÃ³n que escanea la carpeta y refresca la UI
+            # Volvemos a ejecutar la función que escanea la carpeta y refresca la UI
             self.cargar_instancias() 
             # Marcamos el evento como aceptado para que no se propague
             event.accept()

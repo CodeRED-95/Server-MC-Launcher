@@ -12,11 +12,11 @@ import zipfile
 from PyQt6.QtWidgets import (QDialog, QPlainTextEdit, QLineEdit, QPushButton, 
                              QHBoxLayout, QVBoxLayout, QLabel, QComboBox, 
                               QProgressBar, QMessageBox, QFileDialog, QListWidget, QListWidgetItem,
-                              QTabWidget, QWidget, QSizePolicy)
+                              QTabWidget, QWidget, QSizePolicy, QAbstractItemView)
 from PyQt6.QtWidgets import QGroupBox
 from PyQt6.QtCore import Qt, pyqtSignal, QRegularExpression, QUrl, QSize
 from PyQt6.QtGui import QSyntaxHighlighter, QTextCharFormat, QColor, QIcon, QDesktopServices, QPixmap, QImage
-from workers import DownloaderWorker, FTBDownloadWorker, ZipExtractionWorker
+from workers import DownloaderWorker, FTBDownloadWorker, ZipExtractionWorker, FileDownloadWorker
 
 class LogHighlighter(QSyntaxHighlighter):
     def __init__(self, parent):
@@ -331,13 +331,18 @@ class ConfigInstanciaDialog(QDialog):
         self.grupo_mods.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.lbl_cantidad_mods = QLabel()
         self.lista_mods = QListWidget()
-        self.lista_mods.setMinimumHeight(130)
+        self.lista_mods.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        self.lista_mods.setMinimumHeight(180)
         self.lista_mods.setWordWrap(False)
         self.lista_mods.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.lista_mods.setIconSize(QSize(28, 28))
         self.btn_abrir_instancia = QPushButton("📂 Abrir carpeta de la instancia")
         self.btn_abrir_mods = QPushButton("🧩 Abrir carpeta de mods")
+        self.btn_eliminar_mods = QPushButton("🗑 Eliminar mod(s)")
+        self.btn_descargar_mods = QPushButton("⬇️ Descargar mods")
         layout_carpetas = QHBoxLayout()
+        layout_carpetas.addWidget(self.btn_descargar_mods)
+        layout_carpetas.addWidget(self.btn_eliminar_mods)
         layout_carpetas.addWidget(self.btn_abrir_instancia)
         layout_carpetas.addWidget(self.btn_abrir_mods)
         layout_mods = QVBoxLayout(self.grupo_mods)
@@ -433,6 +438,8 @@ class ConfigInstanciaDialog(QDialog):
         self.btn_abrir_mods.clicked.connect(
             lambda: self.abrir_carpeta(os.path.join(self.ruta_instancia, "mods"), crear=True)
         )
+        self.btn_descargar_mods.clicked.connect(self.abrir_descargador_mods)
+        self.btn_eliminar_mods.clicked.connect(self.eliminar_mods_seleccionados)
         self.btn_eliminar.clicked.connect(self.eliminar_instancia_con_confirmacion)
         self.btn_actualizar.clicked.connect(self.preparar_actualizacion)
         self.btn_actualizar_zip.clicked.connect(self.solicitar_actualizacion_zip.emit)
@@ -448,7 +455,9 @@ class ConfigInstanciaDialog(QDialog):
         if os.path.isdir(ruta_mods):
             for archivo in sorted(os.listdir(ruta_mods), key=str.lower):
                 if archivo.lower().endswith((".jar", ".jar.disabled")):
-                    mods.append(self.leer_info_mod(os.path.join(ruta_mods, archivo), archivo))
+                    info = self.leer_info_mod(os.path.join(ruta_mods, archivo), archivo)
+                    info["ruta"] = os.path.join(ruta_mods, archivo)
+                    mods.append(info)
         for mod in mods:
             texto = self.formatear_mod_para_lista(mod)
             item = QListWidgetItem(texto)
@@ -456,10 +465,56 @@ class ConfigInstanciaDialog(QDialog):
                 item.setIcon(mod["icono"])
             item.setToolTip(self.formatear_mod_para_tooltip(mod))
             item.setSizeHint(QSize(0, 28))
+            item.setData(Qt.ItemDataRole.UserRole, mod.get("ruta", ""))
             self.lista_mods.addItem(item)
         self.lbl_cantidad_mods.setText(f"{len(mods)} mod(s) encontrado(s)")
         if not mods:
             self.lista_mods.addItem("Esta instancia no contiene mods.")
+
+    def eliminar_mods_seleccionados(self):
+        items = self.lista_mods.selectedItems()
+        if not items:
+            QMessageBox.information(self, "Eliminar mods", "Selecciona uno o más mods para borrar.")
+            return
+
+        rutas = []
+        nombres = []
+        for item in items:
+            ruta = item.data(Qt.ItemDataRole.UserRole)
+            if ruta:
+                rutas.append(ruta)
+                nombres.append(os.path.basename(ruta))
+
+        if not rutas:
+            QMessageBox.information(self, "Eliminar mods", "No se encontraron rutas válidas para borrar.")
+            return
+
+        respuesta = QMessageBox.warning(
+            self,
+            "Confirmar eliminación",
+            "Se eliminarán estos mods:\n\n" + "\n".join(nombres[:20]) + ("\n..." if len(nombres) > 20 else "") + "\n\n¿Continuar?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if respuesta != QMessageBox.StandardButton.Yes:
+            return
+
+        eliminados = 0
+        errores = []
+        for ruta in rutas:
+            try:
+                if os.path.isdir(ruta):
+                    shutil.rmtree(ruta)
+                else:
+                    os.remove(ruta)
+                eliminados += 1
+            except OSError as error:
+                errores.append(f"{os.path.basename(ruta)}: {error}")
+
+        self.cargar_lista_mods()
+        if errores:
+            QMessageBox.warning(self, "Eliminar mods", "Algunos mods no se pudieron borrar:\n\n" + "\n".join(errores[:5]))
+        elif eliminados:
+            QMessageBox.information(self, "Eliminar mods", f"Se eliminaron {eliminados} mod(s).")
 
     def _icono_desde_bytes(self, datos):
         if not datos:
@@ -546,8 +601,8 @@ class ConfigInstanciaDialog(QDialog):
         version = mod.get("version", "")
         archivo = mod.get("archivo", "")
         version_texto = version or "sin versión"
-        archivo_texto = f"[{archivo}]" if archivo else ""
-        return "  —  ".join([parte for parte in (nombre, version_texto, archivo_texto) if parte])
+        archivo_texto = archivo or "sin archivo"
+        return f"{nombre} / {version_texto} / {archivo_texto}"
 
     def formatear_mod_para_tooltip(self, mod):
         return self.formatear_mod_para_lista(mod)
@@ -646,6 +701,11 @@ class ConfigInstanciaDialog(QDialog):
             QDesktopServices.openUrl(QUrl.fromLocalFile(ruta))
         except OSError as error:
             QMessageBox.critical(self, "No se pudo abrir la carpeta", str(error))
+
+    def abrir_descargador_mods(self):
+        dialogo = ModDownloadDialog(self.ruta_instancia, parent=self)
+        dialogo.exec()
+        self.cargar_lista_mods()
 
     def intentar_recuperar_metadatos_log(self):
         """Analiza el archivo log de FTB para recuperar el nombre e ID del modpack."""
@@ -781,11 +841,272 @@ class ConfigInstanciaDialog(QDialog):
         super().accept()
 
 
+class ModDownloadDialog(QDialog):
+    def __init__(self, ruta_instancia, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Descargar mods desde Modrinth / CurseForge")
+        self.resize(980, 660)
+        self.ruta_instancia = ruta_instancia
+        self.ruta_mods = os.path.join(self.ruta_instancia, "mods")
+        self.worker = None
+        self.resultados_modrinth = []
+        self.resultados_curseforge = []
+
+        self.tabs = QTabWidget()
+
+        self.txt_modrinth_buscar = QLineEdit()
+        self.txt_modrinth_buscar.setPlaceholderText("Buscar mod en Modrinth...")
+        self.btn_modrinth_buscar = QPushButton("Buscar")
+        self.lista_modrinth = QListWidget()
+        self.lista_modrinth.setIconSize(QSize(32, 32))
+        self.lbl_modrinth_estado = QLabel("Listo para buscar.")
+        self.btn_modrinth_descargar = QPushButton("Descargar seleccionado")
+
+        tab_modrinth = QWidget()
+        layout_modrinth = QVBoxLayout(tab_modrinth)
+        fila_modrinth = QHBoxLayout()
+        fila_modrinth.addWidget(self.txt_modrinth_buscar, 1)
+        fila_modrinth.addWidget(self.btn_modrinth_buscar)
+        layout_modrinth.addLayout(fila_modrinth)
+        layout_modrinth.addWidget(self.lista_modrinth, 1)
+        layout_modrinth.addWidget(self.lbl_modrinth_estado)
+        layout_modrinth.addWidget(self.btn_modrinth_descargar)
+
+        self.txt_curseforge_buscar = QLineEdit()
+        self.txt_curseforge_buscar.setPlaceholderText("Buscar mod en CurseForge...")
+        self.txt_curseforge_api = QLineEdit()
+        self.txt_curseforge_api.setPlaceholderText("API key de CurseForge")
+        self.txt_curseforge_api.setEchoMode(QLineEdit.EchoMode.Password)
+        self.btn_curseforge_buscar = QPushButton("Buscar")
+        self.lista_curseforge = QListWidget()
+        self.lista_curseforge.setIconSize(QSize(32, 32))
+        self.lbl_curseforge_estado = QLabel("CurseForge requiere API key.")
+        self.btn_curseforge_descargar = QPushButton("Descargar seleccionado")
+
+        tab_curseforge = QWidget()
+        layout_curseforge = QVBoxLayout(tab_curseforge)
+        fila_curseforge = QHBoxLayout()
+        fila_curseforge.addWidget(self.txt_curseforge_buscar, 1)
+        fila_curseforge.addWidget(self.btn_curseforge_buscar)
+        layout_curseforge.addLayout(fila_curseforge)
+        layout_curseforge.addWidget(self.txt_curseforge_api)
+        layout_curseforge.addWidget(self.lista_curseforge, 1)
+        layout_curseforge.addWidget(self.lbl_curseforge_estado)
+        layout_curseforge.addWidget(self.btn_curseforge_descargar)
+
+        self.tabs.addTab(tab_modrinth, "Modrinth")
+        self.tabs.addTab(tab_curseforge, "CurseForge")
+
+        self.progreso = QProgressBar()
+        self.progreso.setValue(0)
+        self.lbl_estado = QLabel("Elige una pestaña y busca un mod.")
+        self.btn_cerrar = QPushButton("Cerrar")
+
+        layout_botones = QHBoxLayout()
+        layout_botones.addStretch()
+        layout_botones.addWidget(self.btn_cerrar)
+
+        layout_principal = QVBoxLayout()
+        layout_principal.addWidget(self.tabs)
+        layout_principal.addWidget(self.lbl_estado)
+        layout_principal.addWidget(self.progreso)
+        layout_principal.addLayout(layout_botones)
+        self.setLayout(layout_principal)
+
+        self.btn_modrinth_buscar.clicked.connect(self.buscar_modrinth)
+        self.btn_modrinth_descargar.clicked.connect(self.descargar_modrinth)
+        self.btn_curseforge_buscar.clicked.connect(self.buscar_curseforge)
+        self.btn_curseforge_descargar.clicked.connect(self.descargar_curseforge)
+        self.btn_cerrar.clicked.connect(self.reject)
+        self.txt_modrinth_buscar.returnPressed.connect(self.buscar_modrinth)
+        self.txt_curseforge_buscar.returnPressed.connect(self.buscar_curseforge)
+
+    def _json_url(self, url, headers=None):
+        req = urllib.request.Request(url, headers=headers or {})
+        with urllib.request.urlopen(req, timeout=45) as respuesta:
+            return json.loads(respuesta.read().decode("utf-8", errors="replace"))
+
+    def _formatear_resultado(self, nombre, autor, descripcion, fuente):
+        partes = [nombre]
+        if autor:
+            partes.append(f"por {autor}")
+        if descripcion:
+            partes.append(descripcion)
+        partes.append(f"[{fuente}]")
+        return " - ".join(partes)
+
+    def _ruta_unica(self, ruta):
+        if not os.path.exists(ruta):
+            return ruta
+        base, ext = os.path.splitext(ruta)
+        indice = 2
+        while True:
+            candidata = f"{base}_{indice}{ext}"
+            if not os.path.exists(candidata):
+                return candidata
+            indice += 1
+
+    def _icono_desde_url(self, url):
+        if not url:
+            return QIcon()
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "Server-MC-Launcher"})
+            with urllib.request.urlopen(req, timeout=20) as respuesta:
+                datos = respuesta.read()
+            imagen = QImage.fromData(datos)
+            if imagen.isNull():
+                return QIcon()
+            return QIcon(QPixmap.fromImage(imagen))
+        except Exception:
+            return QIcon()
+
+    def buscar_modrinth(self):
+        termino = self.txt_modrinth_buscar.text().strip()
+        if not termino:
+            QMessageBox.information(self, "Buscar mod", "Escribe un nombre para buscar en Modrinth.")
+            return
+        self.lista_modrinth.clear()
+        self.resultados_modrinth = []
+        self.lbl_modrinth_estado.setText("Buscando en Modrinth...")
+        try:
+            url = "https://api.modrinth.com/v2/search?query=" + urllib.parse.quote(termino) + "&limit=20&facets=%5B%5B%22project_type%3Amod%22%5D%5D"
+            datos = self._json_url(url, headers={"User-Agent": "Server-MC-Launcher"})
+            for hit in datos.get("hits", []):
+                info = {
+                    "id": hit.get("project_id", ""),
+                    "name": hit.get("title", ""),
+                    "author": hit.get("author", ""),
+                    "description": hit.get("description", ""),
+                    "icon_url": hit.get("icon_url", ""),
+                    "source": "Modrinth",
+                }
+                self.resultados_modrinth.append(info)
+                item = QListWidgetItem(self._formatear_resultado(info["name"], info["author"], info["description"], "Modrinth"))
+                icono = self._icono_desde_url(info.get("icon_url", ""))
+                if not icono.isNull():
+                    item.setIcon(icono)
+                item.setToolTip(info["description"] or info["name"])
+                self.lista_modrinth.addItem(item)
+            self.lbl_modrinth_estado.setText(f"Se encontraron {len(self.resultados_modrinth)} resultado(s).")
+        except Exception as e:
+            self.lbl_modrinth_estado.setText("Error al buscar en Modrinth.")
+            QMessageBox.critical(self, "Modrinth", str(e))
+
+    def buscar_curseforge(self):
+        termino = self.txt_curseforge_buscar.text().strip()
+        api_key = self.txt_curseforge_api.text().strip()
+        if not termino:
+            QMessageBox.information(self, "Buscar mod", "Escribe un nombre para buscar en CurseForge.")
+            return
+        if not api_key:
+            QMessageBox.warning(self, "CurseForge", "CurseForge necesita una API key para buscar y descargar.")
+            return
+        self.lista_curseforge.clear()
+        self.resultados_curseforge = []
+        self.lbl_curseforge_estado.setText("Buscando en CurseForge...")
+        try:
+            url = "https://api.curseforge.com/v1/mods/search?gameId=432&pageSize=20&searchFilter=" + urllib.parse.quote(termino)
+            datos = self._json_url(url, headers={"x-api-key": api_key, "User-Agent": "Server-MC-Launcher"})
+            for mod in datos.get("data", []):
+                autores = mod.get("authors") or []
+                autor = autores[0].get("name", "") if autores and isinstance(autores[0], dict) else ""
+                info = {
+                    "id": mod.get("id", 0),
+                    "name": mod.get("name", ""),
+                    "author": autor,
+                    "description": mod.get("summary", ""),
+                    "icon_url": (mod.get("logo") or {}).get("thumbnailUrl") or (mod.get("logo") or {}).get("url", ""),
+                    "source": "CurseForge",
+                }
+                self.resultados_curseforge.append(info)
+                item = QListWidgetItem(self._formatear_resultado(info["name"], info["author"], info["description"], "CurseForge"))
+                icono = self._icono_desde_url(info.get("icon_url", ""))
+                if not icono.isNull():
+                    item.setIcon(icono)
+                item.setToolTip(info["description"] or info["name"])
+                self.lista_curseforge.addItem(item)
+            self.lbl_curseforge_estado.setText(f"Se encontraron {len(self.resultados_curseforge)} resultado(s).")
+        except Exception as e:
+            self.lbl_curseforge_estado.setText("Error al buscar en CurseForge.")
+            QMessageBox.critical(self, "CurseForge", str(e))
+
+    def descargar_modrinth(self):
+        fila = self.lista_modrinth.currentRow()
+        if fila < 0 or fila >= len(self.resultados_modrinth):
+            QMessageBox.information(self, "Modrinth", "Selecciona un mod para descargar.")
+            return
+        mod = self.resultados_modrinth[fila]
+        try:
+            versiones = self._json_url(f"https://api.modrinth.com/v2/project/{mod['id']}/version", headers={"User-Agent": "Server-MC-Launcher"})
+            version = next((v for v in versiones if v.get("version_type") == "release"), None) or (versiones[0] if versiones else None)
+            if not version:
+                raise RuntimeError("No se encontraron versiones descargables.")
+            archivo = next((f for f in version.get("files", []) if f.get("primary")), None) or (version.get("files") or [None])[0]
+            if not archivo or not archivo.get("url"):
+                raise RuntimeError("La versión seleccionada no incluye un archivo descargable.")
+            destino = self._ruta_unica(os.path.join(self.ruta_mods, archivo.get("filename", f"{mod['name']}.jar")))
+            self._iniciar_descarga(archivo["url"], destino, "Modrinth")
+        except Exception as e:
+            QMessageBox.critical(self, "Modrinth", str(e))
+
+    def descargar_curseforge(self):
+        fila = self.lista_curseforge.currentRow()
+        if fila < 0 or fila >= len(self.resultados_curseforge):
+            QMessageBox.information(self, "CurseForge", "Selecciona un mod para descargar.")
+            return
+        api_key = self.txt_curseforge_api.text().strip()
+        if not api_key:
+            QMessageBox.warning(self, "CurseForge", "CurseForge necesita una API key.")
+            return
+        mod = self.resultados_curseforge[fila]
+        try:
+            archivos = self._json_url(
+                f"https://api.curseforge.com/v1/mods/{mod['id']}/files?pageSize=20",
+                headers={"x-api-key": api_key, "User-Agent": "Server-MC-Launcher"},
+            )
+            lista_archivos = archivos.get("data", [])
+            archivo = next((f for f in lista_archivos if f.get("downloadUrl")), None)
+            if not archivo:
+                raise RuntimeError("No se encontró un archivo descargable.")
+            destino = self._ruta_unica(os.path.join(self.ruta_mods, archivo.get("fileName", f"{mod['name']}.jar")))
+            self._iniciar_descarga(archivo["downloadUrl"], destino, "CurseForge", headers={"User-Agent": "Server-MC-Launcher"})
+        except Exception as e:
+            QMessageBox.critical(self, "CurseForge", str(e))
+
+    def _iniciar_descarga(self, url, destino, fuente, headers=None):
+        self.progreso.setValue(0)
+        self.lbl_estado.setText(f"Descargando desde {fuente}...")
+        self.btn_modrinth_descargar.setEnabled(False)
+        self.btn_curseforge_descargar.setEnabled(False)
+        self.btn_modrinth_buscar.setEnabled(False)
+        self.btn_curseforge_buscar.setEnabled(False)
+        self.worker = FileDownloadWorker(url, destino, headers=headers)
+        self.worker.progreso.connect(self.progreso.setValue)
+        self.worker.estado.connect(self.lbl_estado.setText)
+        self.worker.finalizado.connect(lambda exito, mensaje, ruta: self._descarga_finalizada(exito, mensaje, ruta, fuente))
+        self.worker.start()
+
+    def _descarga_finalizada(self, exito, mensaje, ruta, fuente):
+        self.btn_modrinth_descargar.setEnabled(True)
+        self.btn_curseforge_descargar.setEnabled(True)
+        self.btn_modrinth_buscar.setEnabled(True)
+        self.btn_curseforge_buscar.setEnabled(True)
+        if exito:
+            self.lbl_estado.setText(f"{fuente}: archivo guardado.")
+            parent = self.parent()
+            if parent and hasattr(parent, "cargar_lista_mods"):
+                parent.cargar_lista_mods()
+            QMessageBox.information(self, "Descarga completada", f"El mod se guardó en:\n{ruta}")
+        else:
+            self.lbl_estado.setText(f"{fuente}: error al descargar.")
+            QMessageBox.critical(self, fuente, mensaje)
+
+
 class FTBDownloaderDialog(QDialog):
     def __init__(self, ruta_instancias_raiz, ruta_javas_raiz=None, ruta_update=None, modpack_id=None, version_actual=None, parent=None):
         super().__init__(parent)
         self.setWindowTitle("📥 Descargar Servidor Oficial FTB")
-        self.resize(550, 420)
+        self.resize(720, 680)
         self.ruta_instancias_raiz = ruta_instancias_raiz
         self.ruta_javas_raiz = ruta_javas_raiz if ruta_javas_raiz else os.path.join(os.getcwd(), "javas")
         self.ruta_update = ruta_update
@@ -802,9 +1123,11 @@ class FTBDownloaderDialog(QDialog):
         self.lbl_version = QLabel("Seleccionar Versión del Servidor:")
         self.combo_versiones = QComboBox()
         
+        self.lbl_log_instalacion = QLabel("Log de instalación:")
         self.log_instalacion = QPlainTextEdit()
         self.log_instalacion.setReadOnly(True)
-        self.log_instalacion.setMaximumHeight(120)
+        self.log_instalacion.setMinimumHeight(300)
+        self.log_instalacion.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.log_instalacion.setStyleSheet("background-color: #1a1a1a; color: #00ff00; font-family: Consolas; font-size: 9pt;")
         # Auto-scroll al final
         self.log_instalacion.textChanged.connect(lambda: self.log_instalacion.ensureCursorVisible())
@@ -832,7 +1155,8 @@ class FTBDownloaderDialog(QDialog):
         layout_principal.addWidget(self.lista_resultados)
         layout_principal.addWidget(self.lbl_version)
         layout_principal.addWidget(self.combo_versiones)
-        layout_principal.addWidget(self.log_instalacion)
+        layout_principal.addWidget(self.lbl_log_instalacion)
+        layout_principal.addWidget(self.log_instalacion, 2)
         layout_principal.addLayout(layout_interactivo)
         layout_principal.addWidget(self.lbl_estado)
         layout_principal.addWidget(self.barra_progreso)
@@ -1002,7 +1326,7 @@ class FTBDownloaderDialog(QDialog):
         self.worker = FTBDownloadWorker(url_descarga_exe, ruta_instancia_destino, self.ruta_javas_raiz, id_modpack, id_version)
         self.worker.progreso.connect(self.barra_progreso.setValue)
         self.worker.estado.connect(self.lbl_estado.setText)
-        self.worker.estado.connect(self.log_instalacion.appendPlainText)
+        self.worker.log.connect(self.log_instalacion.appendPlainText)
         self.worker.finalizado.connect(lambda exito, msg: self.instalacion_ftb_finalizada(
             exito, msg, ruta_instancia_destino, nombre_carpeta_final,
             modpack_detalles, id_modpack, id_version
