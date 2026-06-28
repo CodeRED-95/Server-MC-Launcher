@@ -1,67 +1,50 @@
-# Minecraft Server Launcher Grid Pro
+# Server MC Launcher
 
-Aplicación de escritorio en Python/PyQt para crear, configurar y lanzar instancias de servidores de Minecraft.
-
-## Funciones principales
-
-- Crear instancias desde ZIP.
-- Descargar servidores FTB desde el catálogo oficial.
-- Configurar Java por instancia o usar autodetección.
-- Agrupar instancias.
-- Cambiar iconos por instancia.
-- Administrar mods instalados.
-- Buscar y descargar mods desde Modrinth.
-- Buscar y descargar mods desde CurseForge con API key.
-- Integración con Playit para red pública.
-- Tema oscuro y tema claro.
+Launcher de escritorio para administrar y abrir un servidor de Minecraft desde una interfaz de PyQt6.
 
 ## Requisitos
 
-- Windows 64-bit.
-- Python 3.10 o superior.
-- Dependencias de PyQt6 y módulos estándar del proyecto.
-- Java portable o instalada para ejecutar las instancias.
+- Python 3.11 o superior
+- `PyQt6`
+- `PyInstaller`
+- Inno Setup para generar el instalador `.exe` de instalación
 
-## Cómo ejecutar
+## Estructura principal
 
-```bash
-python main.py
+- `main.py`: punto de entrada de la aplicación
+- `launcher.py`: ventana principal del launcher
+- `assets/`: iconos y recursos de la interfaz
+- `launcher.spec`: configuración de PyInstaller
+- `build_exe.bat`: compila el ejecutable y limpia `build`
+- `installer.iss`: script de Inno Setup para el instalador
+
+## Crear el ejecutable
+
+Ejecuta:
+
+```bat
+build_exe.bat
 ```
 
-## Java y detección automática
+El script hace lo siguiente:
 
-El launcher analiza el servidor y sus librerías para elegir la versión de Java adecuada.
-Esto evita errores como:
+1. Compila el proyecto con `PyInstaller` usando `launcher.spec`
+2. Genera el ejecutable dentro de `dist`
+3. Elimina la carpeta `build` al finalizar
 
-- `Unsupported major.minor version 65.0`
+Si tienes un entorno virtual en `.venv`, el script lo usa automáticamente. Si no existe, usa `py -m PyInstaller`.
 
-Ese error normalmente significa que el servidor fue lanzado con una versión de Java demasiado vieja para el pack o el loader.
+## Crear el instalador
 
-## Mods
+1. Ejecuta primero `build_exe.bat`
+2. Abre `installer.iss` con Inno Setup
+3. Compila el script para generar el instalador
 
-En la pestaña de configuración de una instancia puedes:
-
-- Ver la lista de mods instalados.
-- Ver nombre, versión y archivo `.jar`.
-- Eliminar uno o varios mods seleccionados.
-- Abrir la carpeta de mods.
-- Descargar mods desde Modrinth o CurseForge.
-
-### CurseForge
-
-CurseForge requiere una API key para buscar y descargar.
-Si no la introduces, el buscador no podrá consultar resultados.
-
-## Estructura general
-
-- `main.py`: punto de entrada.
-- `launcher.py`: ventana principal y ejecución de servidores.
-- `components.py`: diálogos y ventanas de instalación/configuración.
-- `workers.py`: tareas en segundo plano para descargas e instalación.
+El instalador toma el `.exe` desde `dist\ServerMCLauncher.exe`.
+Por compatibilidad, el script no fuerza `SetupIconFile`; si quieres un icono del instalador, conviene usar un `.ico` pequeño en lugar de un `.png`.
 
 ## Notas
 
-- La autodetección de Java prioriza la compatibilidad del servidor.
-- Para Forge o NeoForge modernos, el launcher puede requerir Java 17 o 21 según las clases encontradas en `server.jar` y `libraries/`.
-- Si una instancia usa un loader más moderno, no fuerces una Java inferior.
-
+- El icono de la app se carga desde `assets/app_icon.png`
+- El instalador usa el icono del programa instalado, no un icono propio del asistente
+- Si agregas más recursos que deban viajar con el programa, recuerda incluirlos en `launcher.spec` y, si corresponde, en `installer.iss`
