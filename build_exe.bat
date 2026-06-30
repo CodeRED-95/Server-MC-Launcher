@@ -6,19 +6,34 @@ set "SPEC_FILE=%PROJECT_DIR%launcher.spec"
 set "DIST_DIR=%PROJECT_DIR%dist"
 set "BUILD_DIR=%PROJECT_DIR%build"
 set "PYTHON_EXE="
+set "PYTHON_CANDIDATE="
 
 echo Building executable...
 if exist "%PROJECT_DIR%.venv\Scripts\python.exe" (
     set "PYTHON_EXE=%PROJECT_DIR%.venv\Scripts\python.exe"
 ) else (
-    where python >nul 2>&1
-    if not errorlevel 1 (
-        set "PYTHON_EXE=python"
+    for /d %%P in ("%LocalAppData%\Programs\Python\Python*") do (
+        if exist "%%P\python.exe" set "PYTHON_CANDIDATE=%%P\python.exe"
+    )
+    if defined PYTHON_CANDIDATE (
+        set "PYTHON_EXE=%PYTHON_CANDIDATE%"
     ) else (
+        where python >nul 2>&1
+        if not errorlevel 1 (
+            for /f "delims=" %%P in ('where python') do (
+                set "PYTHON_CANDIDATE=%%P"
+                goto :python_found
+            )
+        )
         where py >nul 2>&1
         if not errorlevel 1 (
-            set "PYTHON_EXE=py"
+            for /f "delims=" %%P in ('where py') do (
+                set "PYTHON_CANDIDATE=%%P"
+                goto :python_found
+            )
         )
+        :python_found
+        if defined PYTHON_CANDIDATE set "PYTHON_EXE=%PYTHON_CANDIDATE%"
     )
 )
 
