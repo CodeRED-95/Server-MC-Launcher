@@ -29,6 +29,13 @@ if not defined PYTHON_EXE (
     exit /b 1
 )
 
+"%PYTHON_EXE%" "%PROJECT_DIR%make_installer_icon.py"
+if errorlevel 1 (
+    echo.
+    echo No se pudo generar el icono del instalador.
+    exit /b 1
+)
+
 "%PYTHON_EXE%" -m PyInstaller --noconfirm --clean "%SPEC_FILE%"
 if errorlevel 1 (
     echo.

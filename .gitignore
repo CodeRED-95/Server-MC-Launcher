@@ -1,1 +1,2 @@
-installer_output/ServerMCLauncherSetup.exe
+dist/
+installer_output/
